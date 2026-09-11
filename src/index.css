@@ -1,0 +1,182 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Brisanet Rebranding Colors */
+  /* Primary: Laranja Vibrante (#FF5022) - Protagonista */
+  --color-primary: #ff5022;
+  --color-primary-50: #fff5f2;
+  --color-primary-100: #ffe8e2;
+  --color-primary-200: #ffd1c5;
+  --color-primary-300: #ffa792;
+  --color-primary-400: #ff7855;
+  --color-primary-500: #ff5022;
+  --color-primary-600: #e63d10;
+  --color-primary-700: #c22e06;
+  --color-primary-800: #992607;
+  --color-primary-900: #7a220a;
+  --color-primary-950: #420e02;
+
+  --color-brand-50: #fff5f2;
+  --color-brand-100: #ffe8e2;
+  --color-brand-200: #ffd1c5;
+  --color-brand-300: #ffa792;
+  --color-brand-400: #ff7855;
+  --color-brand-500: #ff5022;
+  --color-brand-600: #e63d10;
+  --color-brand-700: #c22e06;
+  --color-brand-800: #992607;
+  --color-brand-900: #7a220a;
+  --color-brand-950: #420e02;
+
+  --color-orange-500: #ff5022;
+  --color-orange-600: #e63d10;
+  --color-orange-700: #c22e06;
+
+  /* Secondary: Azul Realce / Tech Blue (#0055FF) - Apoio */
+  --color-secondary: #0055ff;
+  --color-secondary-50: #eef4ff;
+  --color-secondary-100: #dce7fe;
+  --color-secondary-200: #bfd5fe;
+  --color-secondary-300: #93bafd;
+  --color-secondary-400: #6095fa;
+  --color-secondary-500: #0055ff;
+  --color-secondary-600: #0045d6;
+  --color-secondary-700: #0037ad;
+  --color-secondary-800: #002d8c;
+  --color-secondary-900: #002773;
+  --color-secondary-950: #00174a;
+
+  --color-accent-50: #eef4ff;
+  --color-accent-100: #dce7fe;
+  --color-accent-200: #bfd5fe;
+  --color-accent-300: #93bafd;
+  --color-accent-400: #6095fa;
+  --color-accent-500: #0055ff;
+  --color-accent-600: #0045d6;
+  --color-accent-700: #0037ad;
+  --color-accent-800: #002d8c;
+  --color-accent-900: #002773;
+  --color-accent-950: #00174a;
+
+  /* Neutral: Grafite Escuro (#1E1E1E) - Base de Texto e Leitura */
+  --color-text-base: #1e1e1e;
+  --color-graphite-50: #f9fafb;
+  --color-graphite-100: #f3f4f6;
+  --color-graphite-200: #e5e7eb;
+  --color-graphite-300: #d1d5db;
+  --color-graphite-400: #9ca3af;
+  --color-graphite-500: #6b7280;
+  --color-graphite-600: #4b5563;
+  --color-graphite-700: #374151;
+  --color-graphite-800: #262626;
+  --color-graphite-900: #1e1e1e;
+  --color-graphite-950: #121212;
+
+  --color-slate-805: #1e1e1e;
+}
+
+:root {
+  font-size: 130%; /* Proportional font scaling across the application - raised for enhanced readability */
+  --color-primary: #ff5022;
+  --color-primary-hover: #e63d10;
+  --color-secondary: #0055ff;
+  --color-secondary-hover: #0045d6;
+  --color-text-base: #1e1e1e;
+  --color-neutral-text: #1e1e1e;
+  --color-bg-card: #ffffff;
+  --color-bg-subtle: #f9fafb;
+}
+
+body {
+  font-size: 1rem;
+  color: #1e1e1e;
+  background-color: #f8fafc;
+}
+
+/* Hide scrollbar utility for clean horizontal navigation strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom expand datepicker click target to make calendar selection reliable in iframes */
+input[type="date"] {
+  position: relative;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 10;
+}
+
+/* Regras de impressão dedicadas para exportação de Relatórios e PDFs */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm 12mm;
+  }
+
+  body {
+    background-color: #ffffff !important;
+    color: #1e1e1e !important;
+    font-size: 11pt !important;
+    line-height: 1.4 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Ocultar navegação, menus, cabeçalho da aplicação e botões interativos */
+  header,
+  nav,
+  aside,
+  footer,
+  button,
+  .no-print,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  /* Remove o fundo escuro do modal e permite fluxo nativo de página */
+  .fixed.inset-0 {
+    position: static !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  #relatorio-gerencial-printable {
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+  }
+
+  /* Previne quebra de página no meio de cards de chamados */
+  .incident-card,
+  .report-card,
+  .kpi-card {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+}
+
