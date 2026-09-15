@@ -90,7 +90,8 @@ export default function Atenuacoes({
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMsg, setImportMsg] = useState("");
 
-  const parseQuickAtenuacao = (text: string) => {
+  const parseQuickAtenuacao = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 6) {
       return {
@@ -454,7 +455,11 @@ export default function Atenuacoes({
     });
   };
 
-  const handleSmartPasteTicket = (text: string) => {
+  const handleSmartPasteTicket = (text: any) => {
+    if (!text || typeof text !== "string") {
+      setSmartPasteFeedback(null);
+      return;
+    }
     setSmartPasteText(text);
     if (!text.trim()) {
       setSmartPasteFeedback(null);

@@ -39,6 +39,8 @@ interface AdminTabProps {
   setShowConfirmDeleteUserModal?: (show: boolean) => void;
   setUserToDelete?: (user: UserConfig | null) => void;
   setSuccessToast?: (message: string | null) => void;
+  currentUser?: UserConfig | null;
+  setCurrentUser?: React.Dispatch<React.SetStateAction<UserConfig | null>>;
 }
 
 export const AdminTab: React.FC<AdminTabProps> = ({
@@ -51,6 +53,8 @@ export const AdminTab: React.FC<AdminTabProps> = ({
   setShowConfirmDeleteUserModal,
   setUserToDelete,
   setSuccessToast,
+  currentUser,
+  setCurrentUser,
 }) => {
   const [userSearchTerm, setUserSearchTerm] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
@@ -137,6 +141,10 @@ export const AdminTab: React.FC<AdminTabProps> = ({
     const updatedUser = { ...formUser, permissions: updatedPerms };
     // Atualiza apenas o estado local do formulário de edição; persistência definitiva apenas via handleSalvarPermissoes
     setFormUser(updatedUser);
+
+    if (currentUser && formUser.email && String(formUser.email).toLowerCase().trim() === String(currentUser.email).toLowerCase().trim()) {
+      setCurrentUser?.({ ...currentUser, permissions: updatedPerms, nivel: formUser.nivel || currentUser.nivel });
+    }
   };
 
   const [selectedCargo, setSelectedCargo] = useState<string>("Assistente");
@@ -322,6 +330,12 @@ export const AdminTab: React.FC<AdminTabProps> = ({
       setUsersList(updatedList);
       localStorage.setItem("cbe_users_list", JSON.stringify(updatedList));
       setFormUser(updatedUser);
+
+      if (currentUser && cleanEmail === String(currentUser.email || "").trim().toLowerCase()) {
+        const syncedCurrent = { ...currentUser, permissions: permissionsState, nivel: novoCargo };
+        setCurrentUser?.(syncedCurrent);
+        localStorage.setItem("cbe_current_user", JSON.stringify(syncedCurrent));
+      }
 
       // 5. SINCRONIZAÇÃO COM GOOGLE SHEETS: Disparada exclusivamente após o Supabase ser concluído com sucesso (!error)
       try {
@@ -990,6 +1004,10 @@ export const AdminTab: React.FC<AdminTabProps> = ({
                                 const updatedUser = { ...formUser, permissions: updatedPerms };
                                 // Atualiza apenas o formulário de edição local; persistência oficial ocorre ao clicar em Salvar
                                 setFormUser(updatedUser);
+
+                                if (currentUser && formUser.email && String(formUser.email).toLowerCase().trim() === String(currentUser.email).toLowerCase().trim()) {
+                                  setCurrentUser?.({ ...currentUser, permissions: updatedPerms, nivel: formUser.nivel || currentUser.nivel });
+                                }
                               };
 
                               return (

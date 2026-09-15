@@ -76,7 +76,8 @@ export const TrocaCaboTab: React.FC<TrocaCaboTabProps> = ({
     return matchSearch && matchStatus;
   });
 
-  const parseQuickTrocaCabo = (text: string) => {
+  const parseQuickTrocaCabo = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 5) {
       return {

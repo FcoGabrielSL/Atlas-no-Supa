@@ -86,7 +86,8 @@ export const OtdrTab: React.FC<OtdrTabProps> = ({
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMsg, setImportMsg] = useState("");
 
-  const parseQuickOtdr = (text: string) => {
+  const parseQuickOtdr = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 7) {
       return {

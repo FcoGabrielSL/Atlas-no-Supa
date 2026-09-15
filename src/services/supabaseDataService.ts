@@ -138,11 +138,22 @@ export function mapCamadaOpticaToDB(item: Partial<CamadaOpticaRow>) {
 
 export function mapAvisoFromDB(row: any, index?: number): Aviso {
   let comentarios: ComentarioAviso[] = [];
-  if (Array.isArray(row.comentarios)) {
-    comentarios = row.comentarios.map((c: any) => ({
+  const rawComentarios = (Array.isArray(row.Tb_Comentarios) && row.Tb_Comentarios.length > 0)
+    ? row.Tb_Comentarios
+    : (Array.isArray(row.comentarios) && row.comentarios.length > 0 ? row.comentarios : null);
+
+  if (Array.isArray(rawComentarios)) {
+    comentarios = rawComentarios.map((c: any) => ({
+      id: c.id_comentario || c.id,
+      id_comentario: c.id_comentario || c.id,
+      id_autor: c.id_autor || c.id_user,
+      id_user: c.id_autor || c.id_user,
       autor: c.autor || (c.id_autor ? `Operador #${c.id_autor}` : "Operador"),
       data: c.data || c.created_at || new Date().toISOString(),
-      texto: c.texto || ""
+      created_at: c.created_at || c.data || new Date().toISOString(),
+      texto: c.texto || "",
+      tipo_acao: c.tipo_acao || "Comentário",
+      is_finalizacao: c.tipo_acao === "Finalização" || (typeof c.texto === "string" && c.texto.includes("[Finalização]"))
     }));
   } else if (row.comentarios) {
     comentarios = parseComentarios(row.comentarios);
@@ -154,6 +165,17 @@ export function mapAvisoFromDB(row: any, index?: number): Aviso {
   const rawAuthorName = row.autor_dados?.nome
     ? `${row.autor_dados.nome}${row.autor_dados.sobrenome ? " " + row.autor_dados.sobrenome : ""}`.trim()
     : (row.autor || (row.id_autor ? `Operador #${row.id_autor}` : "Sistema"));
+
+  const destinacoesRaw = Array.isArray(row.destinacoes) ? row.destinacoes : [];
+  const lidosSet = new Set<string>();
+  if (Array.isArray(row.lido_por)) {
+    row.lido_por.forEach((id: any) => lidosSet.add(String(id)));
+  }
+  destinacoesRaw.forEach((d: any) => {
+    if (d.lido && d.id_user !== undefined && d.id_user !== null) {
+      lidosSet.add(String(d.id_user));
+    }
+  });
 
   return {
     id: finalId,
@@ -170,12 +192,13 @@ export function mapAvisoFromDB(row: any, index?: number): Aviso {
     dataCriacao: row.data_criacao || row.created_at || row.dataCriacao || "",
     status: row.status || "Aberto",
     lido: row.lido || "Não",
-    lido_por: Array.isArray(row.lido_por) ? row.lido_por : [],
+    lido_por: Array.from(lidosSet),
     concluidoPor: row.concluido_por || row.concluidoPor || "",
     comentarios: comentarios,
+    Tb_Comentarios: row.Tb_Comentarios || comentarios,
     id_autor: row.id_autor ? Number(row.id_autor) : undefined,
     autor_dados: row.autor_dados,
-    ...(row.destinacoes ? { destinacoes: row.destinacoes } : {})
+    destinacoes: destinacoesRaw
   } as any;
 }
 
@@ -226,17 +249,7 @@ export async function fetchEntroncamentosFromSupabase(): Promise<EntroncamentoRo
 
 export async function fetchCamadaOpticaFromSupabase(): Promise<CamadaOpticaRow[]> {
   try {
-    // 1. Tenta buscar da tabela Tb_CamadaOptica dedicada se existir
-    const { data: dedicatedData, error: dedicatedError } = await supabase
-      .from("Tb_CamadaOptica")
-      .select("*, historico:Tb_CamadaOptica_Historico(*)")
-      .order("created_at", { ascending: false });
-
-    if (!dedicatedError && dedicatedData && dedicatedData.length > 0) {
-      return dedicatedData.map((row, idx) => mapCamadaOpticaFromDB(row, idx));
-    }
-
-    // 2. Se a tabela não existir, busca os registros de Camada Óptica na Tb_Entroncamentos filtrando por categoria
+    // Busca os registros de Camada Óptica na Tb_Entroncamentos filtrando por categoria
     const { data, error } = await supabase
       .from("Tb_Entroncamentos")
       .select(`
@@ -248,7 +261,12 @@ export async function fetchCamadaOpticaFromSupabase(): Promise<CamadaOpticaRow[]
       .order("created_at", { ascending: false });
 
     if (error) {
-      return [];
+      const { data: fallbackData } = await supabase
+        .from("Tb_Entroncamentos")
+        .select("*, historico:Tb_Entroncamentos_Historico(*)")
+        .eq("categoria", "Camada Óptica")
+        .order("created_at", { ascending: false });
+      return (fallbackData || []).map((row, idx) => mapCamadaOpticaFromDB(row, idx));
     }
     return (data || []).map((row, idx) => mapCamadaOpticaFromDB(row, idx));
   } catch {
@@ -259,203 +277,68 @@ export async function fetchCamadaOpticaFromSupabase(): Promise<CamadaOpticaRow[]
 export async function fetchAvisosFromSupabase(): Promise<Aviso[]> {
   try {
     const { data, error } = await supabase
-      .from("Tb_Avisos")
-      .select("*, autor_dados:Tb_Users(*), comentarios:Tb_Comentarios(*), destinacoes:Tb_Destinacoes(*)")
-      .order("created_at", { ascending: false });
+      .from('Tb_Avisos')
+      .select(`
+        *,
+        destinacoes:Tb_Destinacoes(*, user:Tb_Users(id, nome, sobrenome, email)),
+        Tb_Comentarios(*)
+      `)
+      .order('created_at', { ascending: false });
 
     if (error) {
-      return [];
+      console.warn("[fetchAvisosFromSupabase] Join with user/comments failed, trying fallback:", error);
+      const { data: fallbackData, error: fbError } = await supabase
+        .from('Tb_Avisos')
+        .select(`
+          *,
+          destinacoes:Tb_Destinacoes(*),
+          Tb_Comentarios(*)
+        `)
+        .order('created_at', { ascending: false });
+
+      if (fbError) {
+        console.warn("[fetchAvisosFromSupabase] Fallback query failed:", fbError);
+        return [];
+      }
+      return (fallbackData || []).map((row, idx) => mapAvisoFromDB(row, idx));
     }
+
     return (data || []).map((row, idx) => mapAvisoFromDB(row, idx));
-  } catch {
+  } catch (err) {
+    console.error("[fetchAvisosFromSupabase] Exception:", err);
     return [];
   }
 }
 
-export async function fetchOtdrFromSupabase(): Promise<OtdrRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_Otdr")
-      .select("*")
-      .order("created_at", { ascending: false });
+export const fetchAvisos = fetchAvisosFromSupabase;
 
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `otdr-${idx + 1}`,
-      TRECHO: r.trecho || "",
-      "ONDE TEM": r.onde_tem || "",
-      "ONDE PRECISA": r.onde_precisa || "",
-      "TAMANHO KM": r.tamanho_km || "",
-      STATUS: r.status || "Pendente",
-      "OBSERVAÇÃO ": r.observacao || "",
-      OBSERVAÇÃO: r.observacao || "",
-      Planejamento: r.planejamento || "",
-      "Data de abertura": r.data_abertura || "",
-      "data estimada": r.data_estimada || "",
-      "data de conclusão": r.data_conclusao || ""
-    }));
-  } catch {
-    return [];
-  }
+// Rotinas para tabelas não homologadas no Supabase (gerenciadas via Google Sheets / cache local)
+export async function fetchOtdrFromSupabase(): Promise<OtdrRow[]> {
+  return [];
 }
 
 export async function fetchAtenuacoesFromSupabase(): Promise<AtenuacoesRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_Atenuacoes")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id_imoc || r.id || `at-${idx + 1}`,
-      Status: r.status || "ABERTO",
-      "Tipo de chamados": r.tipo_chamados || "TRECHO",
-      "Id Imoc": r.id_imoc || r.id || `at-${idx + 1}`,
-      Sla: r.sla || "Médio",
-      Complexidade: r.complexidade || "MÉDIO",
-      "Data de abertura": r.data_abertura || "",
-      "Data de conclusão": r.data_conclusao || "",
-      Rede: r.rede || "",
-      Trecho: r.trecho || "",
-      Percas: r.percas || "0",
-      Detalhamento: r.detalhamento || "",
-      Pioras: r.pioras || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchTestesCampoFromSupabase(): Promise<TestesCampoRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_TestesCampo")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `tc-${idx + 1}`,
-      ID: r.id || `tc-${idx + 1}`,
-      ABERTURA: r.abertura || "",
-      "TRECHOS PARA REALIZAR TESTES": r.trechos_para_realizar_testes || "",
-      LOCALIDADE: r.localidade || "",
-      CONCLUÍDO: r.concluido || "Não",
-      SLA: r.sla || "Médio",
-      "DATA PREVISTA": r.data_prevista || "",
-      OBSERVAÇÃO: r.observacao || "",
-      "LOCAL/TRECHO": r.local_trecho || "",
-      STATUS: r.status || "Pendente",
-      "TIPO DE TESTE": r.tipo_teste || "",
-      TÉCNICO: r.tecnico || "",
-      "DATA DO TESTE": r.data_teste || "",
-      OBSERVAÇÕES: r.observacao || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchBypassFromSupabase(): Promise<BypassRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_Bypass")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `bp-${idx + 1}`,
-      "DISPOSITIVO/TRECHO": r.dispositivo_trecho || "",
-      TRECHOS: r.trechos || "",
-      "PONTO (KM)": r.ponto_km || "",
-      OBSERVAÇÃO: r.observacao || "",
-      "LOCAL INICIAL": r.local_inicial || "",
-      "TRECHOS ROTA DESVIO": r.trechos_rota_desvio || "AMBOS",
-      STATUS: r.status || "Ativo",
-      "MOTIVO BYPASS": r.motivo_bypass || "",
-      "RESPONSÁVEL ": r.responsavel || "",
-      "DATA INICIO": r.data_inicio || "",
-      "PREVISÃO NORMALIZAÇÃO": r.previsao_normalizacao || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchTrocaCaboFromSupabase(): Promise<TrocaCaboRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_TrocaCabo")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `tc-${idx + 1}`,
-      STATUS: r.status || "Pendente",
-      ID: r.id || `tc-${idx + 1}`,
-      DATA: r.data || "",
-      "TRECHO ": r.trecho || "",
-      Descricao: r.descricao || "",
-      "Site A": r.site_a || "",
-      "Abordagem A": r.abordagem_a || "",
-      "Qt de Caixas A ": r.qt_caixas_a || "",
-      "Site B": r.site_b || "",
-      "Abordagem B": r.abordagem_b || "",
-      "Qt de Caixas B": r.qt_caixas_b || "",
-      conclusao: r.conclusao || "",
-      "data conclusao": r.data_conclusao || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchAtuacoesFromSupabase(): Promise<AtuacoesRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_Atuacoes")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `atu-${idx + 1}`,
-      Trecho: r.trecho || "",
-      "Tipo de Atuação": r.tipo_atuacao || "",
-      Técnico: r.tecnico || "",
-      Status: r.status || "EM ANDAMENTO",
-      Data: r.data || "",
-      Detalhes: r.detalhes || "",
-      "Coordenadas Recebidas": r.coordenadas_recebidas || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchRelatorioMensalFromSupabase(): Promise<RelatorioMensalRow[]> {
-  try {
-    const { data, error } = await supabase
-      .from("Tb_RelatorioMensal")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) return [];
-    return (data || []).map((r: any, idx: number) => ({
-      id: r.id || `rel-${idx + 1}`,
-      MÊS: r.mes || "",
-      "TOTAL INCIDENTES": r.total_incidentes || "0",
-      "SLA MENSAL": r.sla_mensal || "",
-      "GANHOS ACUMULADOS": r.ganhos_acumulados || "",
-      "DESTAQUES TÉCNICOS": r.destaques_tecnicos || "",
-      "PRINCIPAIS EVENTOS": r.principais_eventos || ""
-    }));
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 export async function fetchUsersFromSupabase(): Promise<UserConfig[]> {
@@ -482,31 +365,17 @@ export async function fetchUsersFromSupabase(): Promise<UserConfig[]> {
   }));
 }
 
-// Busca unificada e paralela de todas as tabelas via Supabase (Substitui Google Sheets)
+// Busca unificada e paralela estritamente focada nas tabelas homologadas do Supabase
 export async function fetchAllDataFromSupabase() {
   const [
     entroncamentos,
     camadaOptica,
     avisos,
-    otdr,
-    atenuacoes,
-    testesCampo,
-    bypass,
-    trocaCabo,
-    atuacoes,
-    relatorioMensal,
     users
   ] = await Promise.all([
     fetchEntroncamentosFromSupabase().catch(() => []),
     fetchCamadaOpticaFromSupabase().catch(() => []),
     fetchAvisosFromSupabase().catch(() => []),
-    fetchOtdrFromSupabase().catch(() => []),
-    fetchAtenuacoesFromSupabase().catch(() => []),
-    fetchTestesCampoFromSupabase().catch(() => []),
-    fetchBypassFromSupabase().catch(() => []),
-    fetchTrocaCaboFromSupabase().catch(() => []),
-    fetchAtuacoesFromSupabase().catch(() => []),
-    fetchRelatorioMensalFromSupabase().catch(() => []),
     fetchUsersFromSupabase().catch(() => [])
   ]);
 
@@ -514,13 +383,13 @@ export async function fetchAllDataFromSupabase() {
     entroncamentos,
     camadaOptica,
     avisos,
-    otdr,
-    atenuacoes,
-    testesCampo,
-    bypass,
-    trocaCabo,
-    atuacoes,
-    relatorioMensal,
+    otdr: [],
+    atenuacoes: [],
+    testesCampo: [],
+    bypass: [],
+    trocaCabo: [],
+    atuacoes: [],
+    relatorioMensal: [],
     users
   };
 }
@@ -642,17 +511,60 @@ export async function deleteAvisoSupabase(id: string): Promise<void> {
 export async function insertComentarioAvisoSupabase(
   id_aviso: string,
   autor: string,
+  texto: string,
+  id_autor?: number | string,
+  tipo_acao: string = 'Comentário'
+): Promise<any> {
+  const isFinalizacao = tipo_acao === 'Finalização' || texto.includes('[Finalização]');
+  const actionType = isFinalizacao ? 'Finalização' : (tipo_acao === 'Fechamento' || texto.includes('[Fechamento]') ? 'Fechamento' : tipo_acao);
+  const payload: any = {
+    id_aviso,
+    texto,
+    created_at: new Date().toISOString(),
+    tipo_acao: actionType
+  };
+  if (id_autor !== undefined && id_autor !== null && !isNaN(Number(id_autor))) {
+    payload.id_autor = Number(id_autor);
+  }
+  const { data, error } = await supabase.from("Tb_Comentarios").insert([payload]).select();
+  if (error) {
+    console.warn("[Supabase] Falha ao inserir com id_autor em Tb_Comentarios, tentando fallback básico:", error);
+    const { data: d2, error: err2 } = await supabase.from("Tb_Comentarios").insert([{
+      id_aviso,
+      texto,
+      created_at: new Date().toISOString(),
+      tipo_acao: actionType
+    }]).select();
+    if (err2) {
+      console.error("[Supabase] Erro ao inserir Tb_Comentarios:", err2);
+    }
+    return d2?.[0];
+  }
+  return data?.[0];
+}
+
+export async function updateComentarioAvisoSupabase(
+  id_comentario: number | string,
   texto: string
 ): Promise<void> {
-  const { error } = await supabase.from("Tb_Comentarios").insert([{
-    id_aviso,
-    autor,
-    texto,
-    data: new Date().toISOString()
-  }]);
+  const { error } = await supabase
+    .from("Tb_Comentarios")
+    .update({ texto })
+    .eq("id_comentario", id_comentario);
   if (error) {
-    console.error("[Supabase] Erro ao inserir Tb_Comentarios:", error);
-    throw error;
+    console.warn("[Supabase] Erro ao atualizar comentário em Tb_Comentarios:", error);
+  }
+}
+
+export async function deleteComentarioAvisoSupabase(
+  id_comentario: number | string
+): Promise<void> {
+  const { error } = await supabase
+    .from("Tb_Comentarios")
+    .delete()
+    .eq("id_comentario", id_comentario);
+  if (error) {
+    console.warn("[Supabase] Erro ao deletar comentário de Tb_Comentarios:", error);
   }
 }
 

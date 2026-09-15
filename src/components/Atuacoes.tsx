@@ -111,7 +111,8 @@ export default function Atuacoes({
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMsg, setImportMsg] = useState("");
 
-  const parseQuickAtuacoes = (text: string) => {
+  const parseQuickAtuacoes = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 8) {
       return {
@@ -443,7 +444,11 @@ export default function Atuacoes({
   const [smartPasteText, setSmartPasteText] = useState('');
   const [smartPasteFeedback, setSmartPasteFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
-  const handleSmartPasteTicket = (text: string) => {
+  const handleSmartPasteTicket = (text: any) => {
+    if (!text || typeof text !== "string") {
+      setSmartPasteFeedback(null);
+      return;
+    }
     setSmartPasteText(text);
     if (!text.trim()) {
       setSmartPasteFeedback(null);

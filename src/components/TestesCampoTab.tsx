@@ -56,7 +56,8 @@ export const TestesCampoTab: React.FC<TestesCampoTabProps> = ({
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMsg, setImportMsg] = useState("");
 
-  const parseQuickTestesCampo = (text: string) => {
+  const parseQuickTestesCampo = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 6) {
       return {

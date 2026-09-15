@@ -81,7 +81,8 @@ export default function BKBypass({
   const [importStatus, setImportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [importMsg, setImportMsg] = useState("");
 
-  const parseQuickBypass = (text: string) => {
+  const parseQuickBypass = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split('\t').map(p => p.trim());
     if (parts.length >= 4) {
       return {
@@ -185,7 +186,8 @@ export default function BKBypass({
     let points = 0;
 
     bypasses.forEach(b => {
-      const kms = b.pontoKm.match(/([\d.,]+)/g);
+      const pKmStr = String(b.pontoKm || "");
+      const kms = pKmStr ? pKmStr.match(/([\d.,]+)/g) : null;
       const count = kms ? kms.length : 1;
       
       points += count;
@@ -433,10 +435,10 @@ export default function BKBypass({
                 const term = searchTerm.toLowerCase().trim();
                 const count = term 
                   ? filteredBypasses.filter(bp => 
-                      (bp.trechos || "").toLowerCase().includes(term) ||
-                      (bp.localInicial || "").toLowerCase().includes(term) ||
-                      (bp.pontoKm || "").toLowerCase().includes(term) ||
-                      (bp.observacao || bp.motivo || "").toLowerCase().includes(term)
+                      String(bp.trechos || "").toLowerCase().includes(term) ||
+                      String(bp.localInicial || "").toLowerCase().includes(term) ||
+                      String(bp.pontoKm || "").toLowerCase().includes(term) ||
+                      String(bp.observacao || bp.motivo || "").toLowerCase().includes(term)
                     ).length
                   : filteredBypasses.length;
                 return count;
@@ -461,10 +463,10 @@ export default function BKBypass({
                 const term = searchTerm.toLowerCase().trim();
                 const list = term 
                   ? filteredBypasses.filter(bp => 
-                      (bp.trechos || "").toLowerCase().includes(term) ||
-                      (bp.localInicial || "").toLowerCase().includes(term) ||
-                      (bp.pontoKm || "").toLowerCase().includes(term) ||
-                      (bp.observacao || bp.motivo || "").toLowerCase().includes(term)
+                      String(bp.trechos || "").toLowerCase().includes(term) ||
+                      String(bp.localInicial || "").toLowerCase().includes(term) ||
+                      String(bp.pontoKm || "").toLowerCase().includes(term) ||
+                      String(bp.observacao || bp.motivo || "").toLowerCase().includes(term)
                     )
                   : filteredBypasses;
                 

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef } from "react";
-import html2canvas from "html2canvas";
+import html2canvas from "html2canvas-pro";
 import { jsPDF } from "jspdf";
 // @ts-ignore
 import html2pdf from "html2pdf.js";
@@ -274,22 +274,41 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
     return `${dd}/${mm}/${yyyy} às ${hh}:${min}`;
   }, []);
 
-  // Extrai atas de um chamado que ocorreram dentro do período
+  // Extrai atas de um chamado que ocorreram dentro do período (compatível com Supabase Tb_Entroncamentos_Historico / Tb_Atas e Timeline Logs)
   const getAtasInPeriod = (item: any) => {
+    const rawAtas: any[] = [];
+
+    // 1. Histórico vindo do Supabase (Tb_Entroncamentos_Historico ou Tb_Atas / Tb_Historico)
+    const dbHistorico = Array.isArray(item.historico) 
+      ? item.historico 
+      : Array.isArray(item.atas) 
+      ? item.atas 
+      : Array.isArray(item.Tb_Entroncamentos_Historico)
+      ? item.Tb_Entroncamentos_Historico
+      : [];
+
+    dbHistorico.forEach((h: any) => {
+      const rawDate = h.data_ocorrencia || h.data || h.created_at;
+      const d = parseDate(rawDate);
+      const author = h.nome_autor || h.autor?.nome || h.autor || (h.id_autor ? `Usuário #${h.id_autor}` : "Sistema");
+      const content = h.descricao || h.detalhes || h.conteudo || h.acao || "";
+      if (content) {
+        rawAtas.push({
+          date: d ? formatSheetDate(d.toISOString()) : String(rawDate || ""),
+          parsedDate: d,
+          author,
+          content: content.replace(/^\[ATA\/ALINHAMENTO\]\s*/i, "").replace(/^\[ALTERAÇÃO DE PRAZO\]\s*/i, "").trim()
+        });
+      }
+    });
+
+    // 2. Timeline logs em texto da planilha (colunas AÇÕES, ACOES, OBSERVAÇÕES, OBSERVACOES)
     const rawTimeline = item["AÇÕES"] || item["ACOES"] || item["OBSERVAÇÕES"] || item["OBSERVACOES"] || "";
     const logs = parseTimelineLogs(rawTimeline);
-    if (!logs || logs.length === 0) return [];
-
-    const mappedLogs = logs
-      .filter((log: any) => {
-        if (!log.date || log.date === "Histórico" || log.date === "Registro") {
-          return false;
-        }
+    if (logs && logs.length > 0) {
+      logs.forEach((log: any) => {
+        if (!log.date || log.date === "Histórico" || log.date === "Registro") return;
         const d = parseDate(log.date);
-        if (!d) return false;
-        return d >= rangeStart && d <= rangeEnd;
-      })
-      .map((log: any) => {
         let author = log.author || "";
         let content = log.content || "";
 
@@ -304,24 +323,38 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
           .replace(/^\[ALTERACAO_DE_PRAZO\]\s*/i, "")
           .trim();
 
-        const pDate = parseDate(log.date);
-
-        return {
+        rawAtas.push({
           date: log.date,
-          parsedDate: pDate,
+          parsedDate: d,
           author: author || "Sistema",
           content
-        };
+        });
       });
+    }
 
-    // Ordenação estrita descendente por data para garantir que atas[0] seja a ata mais recente
-    mappedLogs.sort((a: any, b: any) => {
+    // Desduplica atas idênticas por conteúdo e data
+    const uniqueMap = new Map<string, any>();
+    rawAtas.forEach((a) => {
+      const key = `${a.date}_${a.content.substring(0, 40).trim()}`;
+      if (!uniqueMap.has(key)) {
+        uniqueMap.set(key, a);
+      }
+    });
+
+    // Filtra pelo período selecionado
+    const filteredAtas = Array.from(uniqueMap.values()).filter((a) => {
+      if (!a.parsedDate) return false;
+      return a.parsedDate >= rangeStart && a.parsedDate <= rangeEnd;
+    });
+
+    // Ordenação decrescente por data para que atas[0] seja a ata mais recente
+    filteredAtas.sort((a: any, b: any) => {
       const timeA = a.parsedDate ? a.parsedDate.getTime() : 0;
       const timeB = b.parsedDate ? b.parsedDate.getTime() : 0;
       return timeB - timeA;
     });
 
-    return mappedLogs;
+    return filteredAtas;
   };
 
   // QUERY PRINCIPAL E PROCESSAMENTO:
@@ -336,6 +369,9 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
       const isClosedInPeriod = closedD ? (closedD >= rangeStart && closedD <= rangeEnd) : false;
       const normStatus = normalizeStatus(item["STATUS"] || "Pendente");
       const fechado = isFechado(normStatus);
+
+      // Anexa a relação de atas filtradas no item
+      (item as any).atas = atasInPeriod;
 
       return {
         item,
@@ -375,7 +411,8 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
     const abertosNoPeriodo = periodRecords.filter((r) => r.isCreatedInPeriod).length;
     const fechadosNoPeriodo = periodRecords.filter((r) => r.fechado && (r.isClosedInPeriod || r.hasAtasInPeriod || r.isCreatedInPeriod)).length;
 
-    const movimentadosNoPeriodo = periodRecords.filter((r) => r.hasAtasInPeriod).length;
+    // Cálculo real de movimentados no período: incidentes.filter(i => i.atas?.length > 0).length
+    const movimentadosNoPeriodo = periodRecords.filter((r) => (r.item.atas && r.item.atas.length > 0) || r.hasAtasInPeriod).length;
     const semMovimentacao = periodRecords.filter((r) => !r.hasAtasInPeriod).length;
 
     // Quebra exata dos 4 status
@@ -433,10 +470,23 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
     // Aguarda ciclo de renderização do React para atualizar o DOM com o modo selecionado
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    // Helper para converter com segurança qualquer valor CSS de cor (incluindo oklch) para rgb/rgba
+    // Garante que o html2canvas no escopo global e no bundle seja o html2canvas-pro com suporte a oklab/oklch
+    if (typeof window !== "undefined") {
+      (window as any).html2canvas = html2canvas;
+    }
+
+    // Helper para converter com segurança qualquer valor CSS de cor (incluindo oklab, oklch, color-mix) para rgb/rgba
     const parseColorToRgb = (colorStr: string): string => {
       if (!colorStr || typeof colorStr !== "string") return "#1E1E1E";
-      if (!colorStr.includes("oklch")) return colorStr;
+      const trimmed = colorStr.trim();
+      if (
+        !trimmed.includes("oklch") &&
+        !trimmed.includes("oklab") &&
+        !trimmed.includes("color-mix") &&
+        !trimmed.includes("color(")
+      ) {
+        return colorStr;
+      }
       try {
         const canvas = document.createElement("canvas");
         canvas.width = 1;
@@ -444,10 +494,10 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return "#1E1E1E";
 
-        // O browser moderno entende oklch perfeitamente no CanvasRenderingContext2D
+        // O browser moderno entende oklab e oklch perfeitamente no CanvasRenderingContext2D
         ctx.clearRect(0, 0, 1, 1);
         ctx.fillStyle = "#ffffff";
-        ctx.fillStyle = colorStr;
+        ctx.fillStyle = trimmed;
         ctx.fillRect(0, 0, 1, 1);
 
         const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
@@ -528,8 +578,15 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
 
             const styleTags = clonedDoc.querySelectorAll("style");
             styleTags.forEach((s) => {
-              if (s.textContent && s.textContent.includes("oklch")) {
-                s.textContent = s.textContent.replace(/oklch\([^)]+\)/g, (match) => parseColorToRgb(match));
+              if (
+                s.textContent &&
+                (s.textContent.includes("oklch") ||
+                  s.textContent.includes("oklab") ||
+                  s.textContent.includes("color-mix"))
+              ) {
+                s.textContent = s.textContent
+                  .replace(/oklch\([^)]+\)/gi, (match) => parseColorToRgb(match))
+                  .replace(/oklab\([^)]+\)/gi, (match) => parseColorToRgb(match));
               }
             });
 
@@ -547,9 +604,38 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
         pagebreak: { mode: ["avoid-all", "css", "legacy"], avoid: [".pdf-card", ".incident-card"] }
       };
 
-      // 3. Executa a geração do PDF via engine do html2pdf.js e restaura o estilo original do DOM
+      // 3. Executa a geração do PDF via engine do html2pdf.js com rodapé e numeração dinâmica de páginas (Página X de Y)
       try {
-        await html2pdf().set(opt).from(element).save();
+        const worker = (html2pdf() as any)
+          .set(opt)
+          .from(element)
+          .toPdf()
+          .get("pdf")
+          .then((pdf: any) => {
+            const totalPages = pdf.internal.getNumberOfPages();
+            for (let i = 1; i <= totalPages; i++) {
+              pdf.setPage(i);
+              pdf.setFontSize(8);
+              pdf.setTextColor(130, 140, 150);
+              const pageWidth = pdf.internal.pageSize.getWidth();
+              const pageHeight = pdf.internal.pageSize.getHeight();
+
+              // Rodapé Fixo: Data/Hora de emissão à esquerda
+              pdf.text(
+                `Relatório Gerencial de Entroncamentos • Emissão: ${emissionDateFormatted}`,
+                12,
+                pageHeight - 7
+              );
+              // Rodapé Fixo: Paginação dinâmica "Página X de Y" à direita
+              pdf.text(
+                `Página ${i} de ${totalPages}`,
+                pageWidth - 12,
+                pageHeight - 7,
+                { align: "right" }
+              );
+            }
+          });
+        await (worker as any).save();
       } finally {
         element.style.width = prevWidth;
         element.style.maxWidth = prevMaxWidth;
@@ -669,61 +755,87 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
     const prazoRaw = item["PRAZO"];
     const prazoFormatted = prazoRaw ? formatSheetDate(prazoRaw) : "ND";
     const isExpired = prazoRaw ? isDeadlineExpired(prazoRaw, status) : false;
-    const atas = metaRecord.atasInPeriod;
+    const atas = metaRecord.atasInPeriod || [];
 
-    // Lógica condicional: "sem_atas" (nenhuma) | "ultima" (apenas 1) | "todas" (todas do período)
-    const displayAtas = atasMode === "sem_atas" ? [] : atasMode === "ultima" ? atas.slice(0, 1) : atas;
+    // Lógica condicional de atas: "sem_atas" (nenhuma) | "ultima" (apenas a mais recente) | "todas" (todas em ordem cronológica)
+    // As atas em metaRecord.atasInPeriod vêm ordenadas decrescente (atas[0] é a mais recente).
+    // Para exibição completa em ordem cronológica, invertemos:
+    const chronologicalAtas = [...atas].reverse();
+    const lastAta = atas.length > 0 ? atas[0] : null;
+
+    // Badges de status coloridas conforme especificação (Em andamento, Solucionado, Sem solução, Pendente)
+    const getStatusBadge = () => {
+      if (metaRecord.normStatus === "Solucionado" || metaRecord.normStatus === "Concluído" || metaRecord.normStatus === "Finalizado" || type === "fechado") {
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+            {status}
+          </span>
+        );
+      }
+      if (metaRecord.normStatus === "Sem solução") {
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-800 border border-rose-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-600" />
+            {status}
+          </span>
+        );
+      }
+      if (metaRecord.normStatus === "Em andamento") {
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+            {status}
+          </span>
+        );
+      }
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-800 border border-orange-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-orange-600" />
+          {status}
+        </span>
+      );
+    };
 
     return (
       <div 
         key={`relatorio-card-${id}-${index}`}
-        className="pdf-card incident-card bg-[#FFFFFF] border border-[#E5E7EB] rounded-lg overflow-hidden mb-4 block"
+        className="pdf-card incident-card bg-[#FFFFFF] border border-[#e2e8f0] rounded-xl overflow-hidden mb-4 block"
         style={{ breakInside: "avoid", pageBreakInside: "avoid" }}
       >
-        {/* Linha 1 (Fundo cinza claro): [ID]: [ROTA] em negrito */}
-        <div className="bg-[#F3F4F6] px-4 py-2.5 text-xs font-bold text-[#1E1E1E] flex items-center justify-between gap-2 border-b border-[#E5E7EB] min-h-[38px]">
+        {/* Linha 1 (Fundo cinza suave): [ID]: [ROTA] em negrito */}
+        <div className="bg-[#f8fafc] px-4 py-2.5 text-xs font-bold text-slate-800 flex items-center justify-between gap-2 border-b border-[#e2e8f0] min-h-[38px]">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <span className="font-mono text-[#374151] bg-[#FFFFFF] border border-[#D1D5DB] rounded px-1.5 py-0.5 text-[10px] shrink-0 font-bold">
+            <span className="font-mono text-slate-700 bg-white border border-slate-300 rounded px-1.5 py-0.5 text-[10px] shrink-0 font-bold">
               {id}
             </span>
-            <span className="break-words whitespace-normal text-[#1E1E1E] leading-normal">{route}</span>
+            <span className="break-words whitespace-normal text-slate-900 leading-normal">{route}</span>
           </div>
-          <span className="text-[10px] font-mono text-[#9CA3AF] font-normal shrink-0 ml-2">
+          <span className="text-[10px] font-mono text-slate-400 font-normal shrink-0 ml-2">
             #{index + 1}
           </span>
         </div>
 
-        {/* Linha 2 (Grid 3 colunas): Provedor: [Nome], Status: [Status], Previsão: [Data] */}
-        <div className="px-4 py-2.5 bg-[#FFFFFF] grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 border-b border-[#F3F4F6] text-xs">
+        {/* Linha 2 (Grid 3 colunas): Provedor, Status, Previsão/Conclusão */}
+        <div className="px-4 py-3 bg-[#FFFFFF] grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-4 border-b border-[#e2e8f0] text-xs">
           {/* Coluna 1: Provedor */}
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-[#9CA3AF] font-medium shrink-0">Provedor:</span>
-            <span className="font-semibold text-[#1E1E1E] break-words whitespace-normal leading-normal">{provedor}</span>
+            <span className="text-slate-400 font-medium shrink-0 font-mono text-[11px] uppercase">Provedor:</span>
+            <span className="font-semibold text-slate-800 break-words whitespace-normal leading-normal">{provedor}</span>
           </div>
 
           {/* Coluna 2: Status */}
           <div className="flex items-center gap-1.5">
-            <span className="text-[#9CA3AF] font-medium shrink-0">Status:</span>
-            <div className="inline-flex items-center gap-1.5 font-semibold text-[#1E1E1E]">
-              <span 
-                className={`w-2 h-2 rounded-full shrink-0 block m-0 p-0 ${
-                  type === "fechado" || metaRecord.fechado || metaRecord.normStatus === "Sem solução"
-                    ? "bg-[#10B981]"
-                    : metaRecord.normStatus === "Em andamento"
-                      ? "bg-[#FBBF24]"
-                      : "bg-[#FF5022]"
-                }`} 
-              />
-              <span className="leading-none m-0 p-0">{status}</span>
-            </div>
+            <span className="text-slate-400 font-medium shrink-0 font-mono text-[11px] uppercase">Status:</span>
+            {getStatusBadge()}
           </div>
 
           {/* Coluna 3: Previsão ou Conclusão */}
           <div className="flex items-center gap-1.5">
-            <span className="text-[#9CA3AF] font-medium">
-              {type === "fechado" ? "Conclusão / Previsão:" : "Previsão:"}
+            <span className="text-slate-400 font-medium font-mono text-[11px] uppercase">
+              {type === "fechado" ? "Conclusão:" : "Previsão:"}
             </span>
-            <span className={`font-semibold ${isExpired && type !== "fechado" ? "text-[#FF5022]" : "text-[#1E1E1E]"}`}>
+            <span className={`font-semibold ${isExpired && type !== "fechado" ? "text-rose-600 font-bold" : "text-slate-800"}`}>
               {prazoFormatted}
               {isExpired && type !== "fechado" && " (Vencido)"}
             </span>
@@ -732,40 +844,60 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
 
         {/* Sub-loop de Atas (Aninhado): Apenas se atasMode !== 'sem_atas' */}
         {atasMode !== "sem_atas" && (
-          <div className="px-4 py-2.5 bg-[#FFFFFF] block">
-            {displayAtas && displayAtas.length > 0 ? (
-              <div className="block">
-                {displayAtas.map((ata: any, ataIdx: number) => (
-                  <div
-                    key={`ata-${id}-${ataIdx}`}
-                    className={`ata-item border-l-4 ${
-                      type === "fechado" || metaRecord.normStatus === "Sem solução" ? "border-[#10B981] bg-[#F0FDF4]" : "border-[#FF5022] bg-[#FFF7ED]"
-                    } p-2.5 text-xs rounded-r space-y-1 mb-2.5 block`}
-                  >
-                    <div className="flex items-center justify-between text-[11px] font-medium text-[#6B7280]">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`font-semibold ${type === "fechado" ? "text-[#047857]" : "text-[#FF5022]"} font-mono`}>
-                          {ata.date}
-                        </span>
-                        <span>•</span>
-                        <span>por <strong className="text-[#374151]">{ata.author}</strong></span>
-                        {atasMode === "ultima" && (
-                          <span className="text-[10px] bg-[#E5E7EB] text-[#374151] px-1.5 py-0.2 rounded font-mono font-bold ml-1">
-                            Última Atualização
-                          </span>
-                        )}
-                      </div>
+          <div className="px-4 py-3 bg-[#FFFFFF] block">
+            {/* Modo Resumido: apenas a última ata em container cinza-claro #f8fafc */}
+            {atasMode === "ultima" && (
+              lastAta ? (
+                <div className="p-3 bg-[#f8fafc] border border-[#e2e8f0] rounded-lg text-xs space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[#FF5022] font-mono font-bold">{lastAta.date}</span>
+                      <span>•</span>
+                      <span>por <strong className="text-slate-800">{lastAta.author}</strong></span>
+                      <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.2 rounded font-mono font-bold uppercase ml-1">
+                        Última Movimentação
+                      </span>
                     </div>
-                    <p className="text-[#374151] leading-relaxed whitespace-pre-wrap break-words text-xs pr-1">
-                      {ata.content}
-                    </p>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-[#9CA3AF] italic text-xs py-0.5">
-                {type === "fechado" ? "Incidente concluído / solucionado no período" : "Sem atas para o incidente no período selecionado"}
-              </p>
+                  <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words text-xs pt-0.5">
+                    {lastAta.content}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-slate-400 italic text-xs py-0.5">
+                  Sem movimentações registradas no período selecionado
+                </p>
+              )
+            )}
+
+            {/* Modo Completo: todas as atas em ordem cronológica */}
+            {atasMode === "todas" && (
+              chronologicalAtas.length > 0 ? (
+                <div className="space-y-2">
+                  {chronologicalAtas.map((ata: any, ataIdx: number) => (
+                    <div
+                      key={`ata-${id}-${ataIdx}`}
+                      className="p-3 bg-[#f8fafc] border-l-4 border-l-[#FF5022] border-y border-r border-[#e2e8f0] rounded-r-lg text-xs space-y-1 block"
+                    >
+                      <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[#FF5022] font-mono font-bold">{ata.date}</span>
+                          <span>•</span>
+                          <span>por <strong className="text-slate-800">{ata.author}</strong></span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono">#{ataIdx + 1}</span>
+                      </div>
+                      <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words text-xs pt-0.5">
+                        {ata.content}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-slate-400 italic text-xs py-0.5">
+                  Sem movimentações registradas no período selecionado
+                </p>
+              )
             )}
           </div>
         )}
@@ -1005,80 +1137,112 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
           className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 bg-[#FFFFFF] text-left font-sans text-[#1E1E1E] w-full block print:overflow-visible print:p-4"
         >
           
-          {/* Cabeçalho Executivo do Relatório */}
-          <div className="border-b border-[#E5E7EB] pb-5">
-            <div className="flex justify-between items-end gap-3">
+          {/* Cabeçalho Corporativo Slate 900 */}
+          <div className="bg-[#0f172a] text-white p-6 rounded-xl border border-slate-800 block w-full mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-700/60 pb-4 mb-4">
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="w-3 h-3 rounded-full bg-[#FF5022] inline-block shrink-0" />
-                  <span className="text-xs font-bold tracking-widest text-[#FF5022] uppercase font-mono">
-                    BRISANET TELECOMUNICAÇÕES • DWDM
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#FF5022] inline-block shrink-0" />
+                  <span className="text-[11px] font-bold tracking-widest text-slate-300 uppercase font-mono">
+                    BRISANET TELECOMUNICAÇÕES • DWDM BACKBONE
                   </span>
                 </div>
-                <h1 className="text-[28px] font-extrabold text-[#1E1E1E] tracking-tight leading-tight">
+                <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight leading-tight">
                   Relatório Gerencial de Entroncamentos
                 </h1>
-                <p className="text-xs text-[#6B7280] font-medium mt-1">
-                  Período Analisado: <strong className="text-[#1F2937]">{startFormatted}</strong> até <strong className="text-[#1F2937]">{endFormatted}</strong> | Data de Emissão: <strong className="text-[#1F2937]">{emissionDateFormatted}</strong>
-                </p>
               </div>
 
-              {/* Tag de Período Ativo */}
-              <div className="bg-[#F9FAFB] border border-[#E5E7EB] rounded-lg px-3 py-1.5 text-right shrink-0">
-                <span className="text-[10px] text-[#9CA3AF] block font-mono uppercase">Escopo</span>
-                <span className="text-xs font-bold text-[#1F2937] block">
-                  {period === "all" ? "Histórico Completo" : `${startFormatted} - ${endFormatted}`}
+              <div className="bg-slate-800/80 border border-slate-700 px-3.5 py-2 rounded-lg shrink-0 text-left sm:text-right">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">Status do Escopo</span>
+                <span className="text-xs font-bold text-emerald-400 font-mono block mt-0.5">
+                  {atasMode === "ultima" ? "Resumido (Última Ata)" : atasMode === "sem_atas" ? "Sem Atas" : "Completo (Todas as Atas)"}
                 </span>
-                <span className="text-[10px] font-semibold text-[#FF5022] block font-mono mt-0.5">
-                  {isSummarized ? "Resumido (Última Ata)" : "Completo (Todas as Atas)"}
+              </div>
+            </div>
+
+            {/* Metadados organizados em grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/50">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">Período Analisado</span>
+                <span className="font-semibold text-slate-100 mt-0.5 block">{startFormatted} até {endFormatted}</span>
+              </div>
+              <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/50">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">Data/Hora de Emissão</span>
+                <span className="font-semibold text-slate-100 mt-0.5 block">{emissionDateFormatted}</span>
+              </div>
+              <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/50">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">Filtro de Chamados</span>
+                <span className="font-semibold text-slate-100 mt-0.5 block">
+                  {filterMode === "todos" ? "Todos os Registros" : filterMode === "abertos" ? "Somente Abertos" : "Somente Concluídos"}
+                </span>
+              </div>
+              <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/50">
+                <span className="text-[10px] text-slate-400 font-mono uppercase block">Movimentação</span>
+                <span className="font-semibold text-[#FF5022] mt-0.5 block">
+                  {reportKpis.movimentadosNoPeriodo} de {reportKpis.totalGeral} trechos
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Grid de 3 Cards Superiores (KPIs) */}
-          <div className="grid grid-cols-3 gap-4">
+          {/* Grid de 4 Cards Superiores (KPIs) */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             {/* 1. TOTAL DE TRECHOS */}
-            <div className="kpi-card bg-[#FFFFFF] border border-[#E5E7EB] rounded-xl p-4">
-              <span className="text-xs font-semibold text-[#6B7280] font-mono tracking-wider uppercase block mb-1">
+            <div className="kpi-card bg-[#FFFFFF] border border-[#e2e8f0] rounded-xl p-4">
+              <span className="text-[11px] font-bold text-slate-500 font-mono tracking-wider uppercase block mb-1">
                 Total de Trechos
               </span>
               <div className="flex items-baseline justify-between">
-                <span className="text-[32px] font-extrabold text-[#1E1E1E] tracking-tight leading-none">
+                <span className="text-3xl font-black text-slate-900 tracking-tight leading-none">
                   {reportKpis.totalGeral}
                 </span>
-                <span className="text-xs font-medium text-[#9CA3AF]">
-                  {reportKpis.movimentadosNoPeriodo} movimentados
+                <span className="text-[11px] font-medium text-slate-400 font-mono">
+                  Registros
                 </span>
               </div>
             </div>
 
-            {/* 2. CHAMADOS ABERTOS */}
-            <div className="kpi-card bg-[#FFFFFF] border border-[#E5E7EB] rounded-xl p-4">
-              <span className="text-xs font-semibold text-[#FF5022] font-mono tracking-wider uppercase block mb-1">
-                Chamados Abertos
+            {/* 2. ABERTOS / PENDENTES */}
+            <div className="kpi-card bg-[#FFFFFF] border border-[#e2e8f0] rounded-xl p-4">
+              <span className="text-[11px] font-bold text-orange-600 font-mono tracking-wider uppercase block mb-1">
+                Abertos / Pendentes
               </span>
               <div className="flex items-baseline justify-between">
-                <span className="text-[32px] font-extrabold text-[#FF5022] tracking-tight leading-none">
+                <span className="text-3xl font-black text-orange-600 tracking-tight leading-none">
                   {reportKpis.totalAbertos}
                 </span>
-                <span className="text-xs font-medium text-[#6B7280]">
-                  Pendente / Andamento
+                <span className="text-[11px] font-medium text-slate-400 font-mono">
+                  Não concluídos
                 </span>
               </div>
             </div>
 
-            {/* 3. CHAMADOS FECHADOS */}
-            <div className="kpi-card bg-[#FFFFFF] border border-[#E5E7EB] rounded-xl p-4">
-              <span className="text-xs font-semibold text-[#059669] font-mono tracking-wider uppercase block mb-1">
-                Chamados Fechados
+            {/* 3. SOLUCIONADOS */}
+            <div className="kpi-card bg-[#FFFFFF] border border-[#e2e8f0] rounded-xl p-4">
+              <span className="text-[11px] font-bold text-emerald-600 font-mono tracking-wider uppercase block mb-1">
+                Solucionados
               </span>
               <div className="flex items-baseline justify-between">
-                <span className="text-[32px] font-extrabold text-[#059669] tracking-tight leading-none">
-                  {reportKpis.totalFechados}
+                <span className="text-3xl font-black text-emerald-600 tracking-tight leading-none">
+                  {reportKpis.solucionadosCount}
                 </span>
-                <span className="text-xs font-medium text-[#059669] font-semibold">
-                  Solucionados / Concluídos
+                <span className="text-[11px] font-medium text-slate-400 font-mono">
+                  Concluídos
+                </span>
+              </div>
+            </div>
+
+            {/* 4. MOVIMENTADOS NO PERÍODO */}
+            <div className="kpi-card bg-[#FFFFFF] border border-[#e2e8f0] rounded-xl p-4">
+              <span className="text-[11px] font-bold text-blue-600 font-mono tracking-wider uppercase block mb-1">
+                Movimentados no Período
+              </span>
+              <div className="flex items-baseline justify-between">
+                <span className="text-3xl font-black text-blue-600 tracking-tight leading-none">
+                  {reportKpis.movimentadosNoPeriodo}
+                </span>
+                <span className="text-[11px] font-medium text-slate-400 font-mono">
+                  Com atas
                 </span>
               </div>
             </div>
@@ -1204,9 +1368,10 @@ export const RelatorioGerencialEntroncamentos: React.FC<RelatorioGerencialEntron
             </div>
           )}
 
-          {/* Rodapé institucional */}
-          <div className="pt-6 border-t border-[#E5E7EB] text-center text-xs text-[#9CA3AF] font-mono block w-full">
-            Documento gerado automaticamente pelo Sistema de Controle Operacional de Redes • Brisanet Telecomunicações S.A.
+          {/* Rodapé Corporativo Fixo */}
+          <div className="pt-6 border-t border-[#e2e8f0] flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400 font-mono block w-full">
+            <span>Relatório Gerencial de Entroncamentos • Brisanet Telecomunicações S.A.</span>
+            <span>Emissão: {emissionDateFormatted} • Documento Oficial</span>
           </div>
 
         </div>

@@ -452,7 +452,8 @@ export const EntroncamentosTab: React.FC<EntroncamentosTabProps> = ({
     return records;
   };
 
-  const parseDirectPaste = (text: string): any => {
+  const parseDirectPaste = (text: any): any => {
+    if (!text || typeof text !== "string") return null;
     const parts = text.split("\t").map(p => p.trim());
     
     const cleanQuotes = (str: string) => {
@@ -1528,8 +1529,8 @@ export const EntroncamentosTab: React.FC<EntroncamentosTabProps> = ({
                                         ) : ataLogs.length > 0 ? (
                                           <div className="max-h-[300px] overflow-y-auto pr-1 space-y-3.5 relative border-l border-gray-200 pl-3.5 text-left ml-2 scrollbar-thin">
                                             {ataLogs.map((log, lidx) => {
-                                              const isAta = log.content.includes("[ATA/ALINHAMENTO]");
-                                              let cleanContent = log.content;
+                                              const isAta = typeof log.content === "string" && log.content.includes("[ATA/ALINHAMENTO]");
+                                              let cleanContent = typeof log.content === "string" ? log.content : String(log.content || "");
                                               if (isAta) {
                                                 cleanContent = cleanContent.replace("[ATA/ALINHAMENTO]", "").trim();
                                               }

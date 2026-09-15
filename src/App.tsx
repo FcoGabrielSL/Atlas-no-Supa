@@ -2314,8 +2314,12 @@ useEffect(() => {
               };
 
               const isSovereign = queryEmail === "francisco.gabriel@grupobrisanet.com.br";
+              const matchFromList = usersList.find(u => u.email?.toLowerCase().trim() === queryEmail);
+              const matchedNumericId = (matchFromList?.id && !isNaN(Number(matchFromList.id))) ? matchFromList.id : undefined;
               const updatedUser: UserConfig = {
-                id: serverUser.id || currentUser?.id || "usr-" + Math.floor(1000 + Math.random() * 9000),
+                id: (serverUser.id && !isNaN(Number(serverUser.id)))
+                  ? serverUser.id
+                  : (matchedNumericId || ((currentUser?.id && !isNaN(Number(currentUser.id))) ? currentUser.id : (serverUser.id || currentUser?.id || "usr-" + Math.floor(1000 + Math.random() * 9000)))),
                 nome: serverUser.nome || currentUser?.nome || (isSovereign ? "Francisco" : ""),
                 sobrenome: serverUser.sobrenome || currentUser?.sobrenome || (isSovereign ? "Gabriel" : ""),
                 email: queryEmail,
@@ -2325,18 +2329,6 @@ useEffect(() => {
                 nivel: isSovereign ? "Administrador (Admin)" : (serverUser.nivel || currentUser?.nivel || "Visitante"),
                 permissions: isSovereign ? {
                   ...cleanPermissions,
-                  entroncamentos: { visualizar: true, editar: true, excluir: true },
-                  camada_optica: { visualizar: true, editar: true, excluir: true },
-                  otdr: { visualizar: true, editar: true, excluir: true },
-                  atenuacoes: { visualizar: true, editar: true, excluir: true },
-                  testes_campo: { visualizar: true, editar: true, excluir: true },
-                  bypass: { visualizar: true, editar: true, excluir: true },
-                  relatorio_mensal: { visualizar: true, editar: true, excluir: true },
-                  atuacoes_geral: { visualizar: true, editar: true, excluir: true },
-                  troca_cabo: { visualizar: true, editar: true, excluir: true },
-                  avisos: { visualizar: true, editar: true, excluir: true },
-                  relatorio_periodico: { visualizar: true, editar: true, excluir: true },
-                  settings: { visualizar: true, editar: true, excluir: true },
                   admin: { visualizar: true, editar: true, excluir: true }
                 } : cleanPermissions
               };
@@ -2448,18 +2440,6 @@ useEffect(() => {
         const finalNivel = isSovereign ? "Administrador (Admin)" : updatedInList.nivel;
         const finalPermissions = isSovereign ? {
           ...updatedInList.permissions,
-          entroncamentos: { visualizar: true, editar: true, excluir: true },
-          camada_optica: { visualizar: true, editar: true, excluir: true },
-          otdr: { visualizar: true, editar: true, excluir: true },
-          atenuacoes: { visualizar: true, editar: true, excluir: true },
-          testes_campo: { visualizar: true, editar: true, excluir: true },
-          bypass: { visualizar: true, editar: true, excluir: true },
-          relatorio_mensal: { visualizar: true, editar: true, excluir: true },
-          atuacoes_geral: { visualizar: true, editar: true, excluir: true },
-          troca_cabo: { visualizar: true, editar: true, excluir: true },
-          avisos: { visualizar: true, editar: true, excluir: true },
-          relatorio_periodico: { visualizar: true, editar: true, excluir: true },
-          settings: { visualizar: true, editar: true, excluir: true },
           admin: { visualizar: true, editar: true, excluir: true }
         } : updatedInList.permissions;
 
@@ -2705,28 +2685,58 @@ useEffect(() => {
   // Confirmação de alteração de permissões e helper de segurança
   const [showPermissionSuccessModal, setShowPermissionSuccessModal] = useState<any | null>(null);
   
+  /**
+   * Helper de Acesso Estrito aos Módulos do Sistema
+   * Regra: Independente de o cargo ser Administrador, Coordenador ou Analista,
+   * se a permissão de visualização de um módulo estiver desmarcada (false),
+   * o item DEVE sumir do menu imediatamente.
+   * Única exceção: painel de administração/usuários ('admin' / 'admin_users') para administradores (anti-lockout).
+   */
+  const hasModuleAccess = (
+    userPermissions: Record<string, { visualizar?: boolean }> | string | undefined | null,
+    userLevel: string | undefined | null,
+    moduleKey: string
+  ): boolean => {
+    const normLevel = String(userLevel || "").trim().toLowerCase();
+    const isAdmin = ["administrador", "admin", "adm"].includes(normLevel) || normLevel.includes("admin");
+
+    // 1. Única exceção absoluta de segurança anti-lockout:
+    // Apenas o painel de Admin/Gerenciamento de Usuários fica sempre liberado para Admin
+    if ((moduleKey === "admin_users" || moduleKey === "admin") && isAdmin) {
+      return true;
+    }
+
+    // Parse se for string JSON
+    let perms: Record<string, { visualizar?: boolean }> | undefined;
+    if (typeof userPermissions === "string") {
+      try {
+        perms = JSON.parse(userPermissions);
+      } catch {
+        perms = undefined;
+      }
+    } else if (userPermissions && typeof userPermissions === "object") {
+      perms = userPermissions;
+    }
+
+    // 2. Regra estrita para TODOS os cargos (Admin, Coordenador, Analista, etc.):
+    // Se a chave na matriz estiver false ou undefined, NÃO EXIBE.
+    return Boolean(perms?.[moduleKey]?.visualizar);
+  };
+
   const evaluateUserPermission = (user: UserConfig | null, tab: string, action: "visualizar" | "editar" | "excluir" = "visualizar"): boolean => {
     if (!user) return false;
-    
-    // Super-Administradores e administradores em geral têm acesso total
-    const isSuperAdminEmail = user.email?.toLowerCase().trim() === "francisco.gabriel@grupobrisanet.com.br";
-    const userNivel = String(user.nivel || "").trim().toLowerCase();
-    const isAdmin = ["administrador", "admin", "adm"].includes(userNivel) || isSuperAdminEmail;
-    if (isAdmin) return true;
 
-    // 1. Carrega permissões padrão do cargo do localStorage (se disponível)
-    let cargoDefaults: any = {};
-    try {
-      const savedCargo = localStorage.getItem("cbe_cargo_permissions");
-      if (savedCargo) {
-        const parsedCargo = JSON.parse(savedCargo);
-        const userCargoName = Object.keys(parsedCargo).find(c => c.toLowerCase().trim() === userNivel) || user.nivel;
-        if (userCargoName && parsedCargo[userCargoName]) {
-          cargoDefaults = parsedCargo[userCargoName];
-        }
-      }
-    } catch (e) {
-      console.error(e);
+    // Se for ação de visualização, utiliza estritamente o helper hasModuleAccess
+    if (action === "visualizar") {
+      return hasModuleAccess(user.permissions, user.nivel, tab);
+    }
+
+    const normLevel = String(user.nivel || "").trim().toLowerCase();
+    const isAdmin = ["administrador", "admin", "adm"].includes(normLevel) || normLevel.includes("admin");
+
+    // Anti-lockout: Administrador sempre tem permissão completa no módulo administrativo
+    if ((tab === "admin" || tab === "admin_users") && isAdmin) {
+      return true;
     }
 
     // Resolve as permissões do usuário específico
@@ -2746,22 +2756,64 @@ useEffect(() => {
     }
 
     // B) Se o usuário não tem override explícito para esta aba/ação, herda o padrão do cargo
+    let cargoDefaults: any = {};
+    try {
+      const savedCargo = localStorage.getItem("cbe_cargo_permissions");
+      if (savedCargo) {
+        const parsedCargo = JSON.parse(savedCargo);
+        const userCargoName = Object.keys(parsedCargo).find(c => c.toLowerCase().trim() === normLevel) || user.nivel;
+        if (userCargoName && parsedCargo[userCargoName]) {
+          cargoDefaults = parsedCargo[userCargoName];
+        }
+      }
+    } catch (e) {}
+
     const cargoPermObj = cargoDefaults[tab];
     if (cargoPermObj && typeof cargoPermObj[action] === "boolean") {
       return cargoPermObj[action];
     }
 
-    // C) Defaults globais do sistema
-    if (["admin", "settings"].includes(tab)) return false;
-    if (tab === "avisos") return true;
-    return true; // Padrão aberto para abas operacionais se não especificado
+    return false;
   };
 
   const hasPermissionToView = (tab: string): boolean => {
-    return evaluateUserPermission(currentUser, tab, "visualizar");
+    return hasModuleAccess(currentUser?.permissions, currentUser?.nivel, tab);
   };
 
   const activeTab = hasPermissionToView(activeTabRaw) ? activeTabRaw : "restricted";
+
+  // Redirecionamento reativo: se a aba ativa perder a permissão de visualização na matriz,
+  // redireciona automaticamente para a primeira aba permitida do usuário
+  useEffect(() => {
+    if (!currentUser) return;
+    if (activeTabRaw === "restricted") return;
+
+    const fallbackTabs = [
+      "avisos",
+      "relatorio_periodico",
+      "controle_incidentes",
+      "atenuacoes",
+      "testes_campo",
+      "atuacoes_geral",
+      "troca_cabo",
+      "bypass",
+      "entroncamentos",
+      "camada_optica",
+      "otdr",
+      "admin"
+    ];
+
+    if (!hasModuleAccess(currentUser?.permissions, currentUser?.nivel, activeTabRaw)) {
+      const firstAllowed = fallbackTabs.find(tab =>
+        hasModuleAccess(currentUser?.permissions, currentUser?.nivel, tab)
+      ) || "avisos";
+
+      if (firstAllowed !== activeTabRaw) {
+        console.warn(`[Permissões] Acesso à aba '${activeTabRaw}' revogado. Redirecionando para '${firstAllowed}'.`);
+        setActiveTab(firstAllowed as any);
+      }
+    }
+  }, [currentUser?.permissions, currentUser?.nivel, activeTabRaw]);
   const [ataUpdateField, setAtaUpdateField] = useState<string | null>(null);
   const [ataDate, setAtaDate] = useState("");
   const [ataObjetivo, setAtaObjetivo] = useState("");
@@ -2898,9 +2950,11 @@ useEffect(() => {
 
   const computedBypasses: Bypass[] = useMemo(() => {
     return (bypassData || []).map((b) => {
-      const pontoValue = b["PONTO (KM)"] || "";
+      const rawPonto = b["PONTO (KM)"];
+      const pontoValue = rawPonto !== undefined && rawPonto !== null ? String(rawPonto).trim() : "";
       const pontoKm = pontoValue ? (pontoValue.toLowerCase().includes("km") ? pontoValue : pontoValue + " km") : (() => {
-        const matchKm = b["DISPOSITIVO/TRECHO"]?.match(/(\d+(?:[.,]\d+)?)\s*(?:km|KM)?/);
+        const rawDisp = b["DISPOSITIVO/TRECHO"] !== undefined && b["DISPOSITIVO/TRECHO"] !== null ? String(b["DISPOSITIVO/TRECHO"]) : "";
+        const matchKm = rawDisp.match(/(\d+(?:[.,]\d+)?)\s*(?:km|KM)?/);
         return matchKm ? matchKm[1] + " km" : "0.5 km";
       })();
 
@@ -3130,8 +3184,6 @@ useEffect(() => {
 
       await postToSheets("insert", "AVISOS", fullRecord);
       setSuccessToast("Aviso / Particularidade publicada com sucesso!");
-      
-      await fetchData(true);
       return true;
     } catch (err) {
       console.error(err);
@@ -3171,8 +3223,6 @@ useEffect(() => {
 
       await postToSheets("update", "AVISOS", updatedRecord);
       setSuccessToast("Aviso / Particularidade atualizada com sucesso!");
-
-      await fetchData(true);
       return true;
     } catch (err) {
       console.error(err);
@@ -3206,8 +3256,6 @@ useEffect(() => {
 
       await postToSheets("delete", "AVISOS", targetAviso);
       setSuccessToast("Aviso removido com sucesso!");
-
-      await fetchData(true);
       return true;
     } catch (err) {
       console.error(err);
@@ -3697,22 +3745,10 @@ useEffect(() => {
         if (found) {
           const isSovereign = authEmail === "francisco.gabriel@grupobrisanet.com.br";
           if (isSovereign) {
-            found.nivel = "Administrador (Admin)";
+            found.nivel = found.nivel || "Administrador (Admin)";
             (found as any).role = "ADMIN";
             found.permissions = {
               ...found.permissions,
-              entroncamentos: { visualizar: true, editar: true, excluir: true },
-              camada_optica: { visualizar: true, editar: true, excluir: true },
-              otdr: { visualizar: true, editar: true, excluir: true },
-              atenuacoes: { visualizar: true, editar: true, excluir: true },
-              testes_campo: { visualizar: true, editar: true, excluir: true },
-              bypass: { visualizar: true, editar: true, excluir: true },
-              relatorio_mensal: { visualizar: true, editar: true, excluir: true },
-              atuacoes_geral: { visualizar: true, editar: true, excluir: true },
-              troca_cabo: { visualizar: true, editar: true, excluir: true },
-              avisos: { visualizar: true, editar: true, excluir: true },
-              relatorio_periodico: { visualizar: true, editar: true, excluir: true },
-              settings: { visualizar: true, editar: true, excluir: true },
               admin: { visualizar: true, editar: true, excluir: true }
             };
           }
@@ -4163,9 +4199,42 @@ useEffect(() => {
 
   // Parser de cronograma/timeline para histórico e ações
   const parseTimelineLogs = (
-    text: string,
-  ): { index: number; date: string; content: string }[] => {
-    if (!text) return [];
+    rawText: any,
+  ): { index: number; date: string; content: string; author?: string }[] => {
+    if (!rawText) return [];
+
+    let text = "";
+    if (typeof rawText === "string") {
+      text = rawText;
+    } else if (typeof rawText === "number" || typeof rawText === "boolean") {
+      text = String(rawText);
+    } else if (Array.isArray(rawText)) {
+      return rawText.map((item: any, idx: number) => {
+        if (typeof item === "string") {
+          return { index: idx, date: "Registro", content: item };
+        }
+        return {
+          index: idx,
+          date: item?.created_at || item?.data_ocorrencia || item?.date || item?.data || "Registro",
+          content: item?.descricao || item?.content || item?.texto || "",
+          author: item?.nome_autor || item?.autor?.nome || item?.author || "Usuário"
+        };
+      });
+    } else if (typeof rawText === "object") {
+      if (rawText.descricao || rawText.content || rawText.texto) {
+        return [{
+          index: 0,
+          date: rawText.created_at || rawText.data_ocorrencia || rawText.date || rawText.data || "Registro",
+          content: rawText.descricao || rawText.content || rawText.texto || "",
+          author: rawText.nome_autor || rawText.autor?.nome || rawText.author || "Usuário"
+        }];
+      }
+      return [];
+    } else {
+      return [];
+    }
+
+    if (!text.trim()) return [];
 
     // Expressão regular para encontrar datas bem formatadas:
     // Exemplos: "25/05/2026", "20/01/26", "02/04"
@@ -4286,10 +4355,11 @@ useEffect(() => {
   // Renderiza e formata o conteúdo de um log de timeline:
   // 1. Remove markers de classificação como [ATA/ALINHAMENTO] ou [ALTERAÇÃO DE PRAZO] para exibição limpa
   // 2. Identifica títulos de campos (ex: • Objetivo:) e os coloca em negrito
-  const renderFormattedContent = (content: string) => {
+  const renderFormattedContent = (content: any) => {
     if (!content) return null;
+    const str = typeof content === "string" ? content : String(content || "");
 
-    const cleanContent = content
+    const cleanContent = str
       .replace(/\[ALTERAÇÃO DE PRAZO\]\s*/gi, "")
       .replace(/\[ATA\/ALINHAMENTO\]\s*/gi, "")
       .replace(/\[CONCLUSÃO\]\s*/gi, "")
@@ -4373,15 +4443,15 @@ useEffect(() => {
     return entroncamentos.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["TRECHO A"] || "").toLowerCase().includes(query) ||
-        (item["TRECHO B"] || "").toLowerCase().includes(query) ||
-        (item["TRECHO C"] || "").toLowerCase().includes(query) ||
-        (item["PROVEDOR "] || "").toLowerCase().includes(query) ||
-        (item["RESPONSÁVEL "] || "").toLowerCase().includes(query) ||
-        (item["TIPO"] || "").toLowerCase().includes(query) ||
-        (item["AÇÕES"] || "").toLowerCase().includes(query) ||
-        (item.operId || "").toLowerCase().includes(query) ||
-        (item.ID || "").toLowerCase().includes(query);
+        String(item["TRECHO A"] || "").toLowerCase().includes(query) ||
+        String(item["TRECHO B"] || "").toLowerCase().includes(query) ||
+        String(item["TRECHO C"] || "").toLowerCase().includes(query) ||
+        String(item["PROVEDOR "] || "").toLowerCase().includes(query) ||
+        String(item["RESPONSÁVEL "] || "").toLowerCase().includes(query) ||
+        String(item["TIPO"] || "").toLowerCase().includes(query) ||
+        String(item["AÇÕES"] || "").toLowerCase().includes(query) ||
+        String(item.operId || "").toLowerCase().includes(query) ||
+        String(item.ID || "").toLowerCase().includes(query);
 
       const matchResp =
         responsibleFilter === "all" ||
@@ -4470,9 +4540,9 @@ useEffect(() => {
     return camadaOptica.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["TRECHO"] || "").toLowerCase().includes(query) ||
-        (item["INFORMAÇÃO"] || "").toLowerCase().includes(query) ||
-        (item["HISTORICO"] || "").toLowerCase().includes(query);
+        String(item["TRECHO"] || "").toLowerCase().includes(query) ||
+        String(item["INFORMAÇÃO"] || "").toLowerCase().includes(query) ||
+        String(item["HISTORICO"] || "").toLowerCase().includes(query);
 
       // Se filtro de período ativo, filtra apenas concluídos/solucionados no período
       if (periodFilter !== "all") {
@@ -4545,12 +4615,12 @@ useEffect(() => {
     return otdrData.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["TRECHO"] || "").toLowerCase().includes(query) ||
-        (item["ONDE TEM"] || "").toLowerCase().includes(query) ||
-        (item["ONDE PRECISA"] || "").toLowerCase().includes(query) ||
-        (item["Planejamento"] || "").toLowerCase().includes(query) ||
-        (item["OBSERVAÇÃO "] || "").toLowerCase().includes(query) ||
-        (item["OBSERVAÇÃO"] || "").toLowerCase().includes(query);
+        String(item["TRECHO"] || "").toLowerCase().includes(query) ||
+        String(item["ONDE TEM"] || "").toLowerCase().includes(query) ||
+        String(item["ONDE PRECISA"] || "").toLowerCase().includes(query) ||
+        String(item["Planejamento"] || "").toLowerCase().includes(query) ||
+        String(item["OBSERVAÇÃO "] || "").toLowerCase().includes(query) ||
+        String(item["OBSERVAÇÃO"] || "").toLowerCase().includes(query);
 
       // Se filtro de período ativo, filtra apenas concluídos/solucionados no período
       if (periodFilter !== "all") {
@@ -4623,12 +4693,12 @@ useEffect(() => {
     return atenuacoes.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item.Trecho || "").toLowerCase().includes(query) ||
-        (item.Rede || "").toLowerCase().includes(query) ||
-        (item.Detalhamento || "").toLowerCase().includes(query) ||
-        (item.Sla || "").toLowerCase().includes(query) ||
-        (item["Id Imoc"] || "").toLowerCase().includes(query) ||
-        (item.Status || "").toLowerCase().includes(query);
+        String(item.Trecho || "").toLowerCase().includes(query) ||
+        String(item.Rede || "").toLowerCase().includes(query) ||
+        String(item.Detalhamento || "").toLowerCase().includes(query) ||
+        String(item.Sla || "").toLowerCase().includes(query) ||
+        String(item["Id Imoc"] || "").toLowerCase().includes(query) ||
+        String(item.Status || "").toLowerCase().includes(query);
 
       const statusVal = item.Status || "";
       const matchStatus =
@@ -4654,11 +4724,11 @@ useEffect(() => {
     return testesCampo.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["TRECHOS PARA REALIZAR TESTES"] || item["LOCAL/TRECHO"] || "").toLowerCase().includes(query) ||
-        (item["SLA"] || item["TIPO DE TESTE"] || "").toLowerCase().includes(query) ||
-        (item["LOCALIDADE"] || item["TÉCNICO"] || "").toLowerCase().includes(query) ||
-        (item["OBSERVAÇÃO"] || item["OBSERVAÇÕES"] || "").toLowerCase().includes(query) ||
-        (item["ID"] || item["id"] || "").toLowerCase().includes(query);
+        String(item["TRECHOS PARA REALIZAR TESTES"] || item["LOCAL/TRECHO"] || "").toLowerCase().includes(query) ||
+        String(item["SLA"] || item["TIPO DE TESTE"] || "").toLowerCase().includes(query) ||
+        String(item["LOCALIDADE"] || item["TÉCNICO"] || "").toLowerCase().includes(query) ||
+        String(item["OBSERVAÇÃO"] || item["OBSERVAÇÕES"] || "").toLowerCase().includes(query) ||
+        String(item["ID"] || item["id"] || "").toLowerCase().includes(query);
 
       const statusVal = item["CONCLUÍDO"] || item["STATUS"] || "";
       const matchStatus =
@@ -4683,14 +4753,14 @@ useEffect(() => {
     return bypassData.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["DISPOSITIVO/TRECHO"] || "").toLowerCase().includes(query) ||
-        (item["TRECHOS"] || "").toLowerCase().includes(query) ||
-        (item["PONTO (KM)"] || "").toLowerCase().includes(query) ||
-        (item["LOCAL INICIAL"] || "").toLowerCase().includes(query) ||
-        (item["MOTIVO BYPASS"] || "").toLowerCase().includes(query) ||
-        (item["OBSERVAÇÃO"] || "").toLowerCase().includes(query) ||
-        (item["RESPONSÁVEL "] || "").toLowerCase().includes(query) ||
-        (item["RESPONSÁVEL"] || "").toLowerCase().includes(query);
+        String(item["DISPOSITIVO/TRECHO"] || "").toLowerCase().includes(query) ||
+        String(item["TRECHOS"] || "").toLowerCase().includes(query) ||
+        String(item["PONTO (KM)"] || "").toLowerCase().includes(query) ||
+        String(item["LOCAL INICIAL"] || "").toLowerCase().includes(query) ||
+        String(item["MOTIVO BYPASS"] || "").toLowerCase().includes(query) ||
+        String(item["OBSERVAÇÃO"] || "").toLowerCase().includes(query) ||
+        String(item["RESPONSÁVEL "] || "").toLowerCase().includes(query) ||
+        String(item["RESPONSÁVEL"] || "").toLowerCase().includes(query);
 
       const statusVal = item["STATUS"] || "";
       const matchStatus =
@@ -4712,9 +4782,11 @@ useEffect(() => {
 
   const computedFilteredBypasses: Bypass[] = useMemo(() => {
     return (filteredBypass || []).map((b) => {
-      const pontoValue = b["PONTO (KM)"] || "";
+      const rawPonto = b["PONTO (KM)"];
+      const pontoValue = rawPonto !== undefined && rawPonto !== null ? String(rawPonto).trim() : "";
       const pontoKm = pontoValue ? (pontoValue.toLowerCase().includes("km") ? pontoValue : pontoValue + " km") : (() => {
-        const matchKm = b["DISPOSITIVO/TRECHO"]?.match(/(\d+(?:[.,]\d+)?)\s*(?:km|KM)?/);
+        const rawDisp = b["DISPOSITIVO/TRECHO"] !== undefined && b["DISPOSITIVO/TRECHO"] !== null ? String(b["DISPOSITIVO/TRECHO"]) : "";
+        const matchKm = rawDisp.match(/(\d+(?:[.,]\d+)?)\s*(?:km|KM)?/);
         return matchKm ? matchKm[1] + " km" : "0.5 km";
       })();
 
@@ -4744,11 +4816,11 @@ useEffect(() => {
       const query = searchQuery ? searchQuery.toLowerCase() : "";
       const matchSearch =
         !query ||
-        (item.Trecho || "").toLowerCase().includes(query) ||
-        (item["Tipo de Atuação"] || "").toLowerCase().includes(query) ||
-        (item["Técnico"] || "").toLowerCase().includes(query) ||
-        (item.Detalhes || "").toLowerCase().includes(query) ||
-        (item.Status || "").toLowerCase().includes(query);
+        String(item.Trecho || "").toLowerCase().includes(query) ||
+        String(item["Tipo de Atuação"] || "").toLowerCase().includes(query) ||
+        String(item["Técnico"] || "").toLowerCase().includes(query) ||
+        String(item.Detalhes || "").toLowerCase().includes(query) ||
+        String(item.Status || "").toLowerCase().includes(query);
 
       const statusVal = item.Status || "";
       const matchStatus =
@@ -4785,9 +4857,9 @@ useEffect(() => {
     return relatorioMensal.filter((item) => {
       const query = searchQuery.toLowerCase();
       const matchSearch =
-        (item["MÊS"] || "").toLowerCase().includes(query) ||
-        (item["DESTAQUES TÉCNICOS"] || "").toLowerCase().includes(query) ||
-        (item["PRINCIPAIS EVENTOS"] || "").toLowerCase().includes(query);
+        String(item["MÊS"] || "").toLowerCase().includes(query) ||
+        String(item["DESTAQUES TÉCNICOS"] || "").toLowerCase().includes(query) ||
+        String(item["PRINCIPAIS EVENTOS"] || "").toLowerCase().includes(query);
 
       return matchSearch;
     });
@@ -6839,7 +6911,8 @@ useEffect(() => {
   };
 
   // Função auxiliar para analisar texto contendo múltiplas atas formatadas
-  const parseMultipleAtasText = (text: string): Array<{ date: string; content: string }> => {
+  const parseMultipleAtasText = (text: any): Array<{ date: string; content: string }> => {
+    if (!text || typeof text !== "string") return [];
     let cleanText = text.trim();
     if (cleanText.startsWith('"') && cleanText.endsWith('"')) {
       cleanText = cleanText.substring(1, cleanText.length - 1).trim();
@@ -8674,9 +8747,12 @@ function limparUsuariosDuplicados() {
 
               <nav className="p-2 space-y-1 mt-4">
                   {/* GESTÃO GERAL */}
-                  <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Gestão Geral</span>
+                  {(hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "avisos") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "relatorio_periodico") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "controle_incidentes")) && (
+                    <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Gestão Geral</span>
+                  )}
                   
                   {/* Painel de Avisos */}
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "avisos") && (
                   <button
                     onClick={() => { setActiveTab("avisos"); setSelectedItem(null); setShowMobileSidebar(false); }}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "avisos" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8686,8 +8762,10 @@ function limparUsuariosDuplicados() {
                        <span>Painel de Avisos</span>
                     </div>
                   </button>
+                  )}
 
                   {/* Relatório Semanal */}
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "relatorio_periodico") && (
                   <button
                     onClick={() => { setActiveTab("relatorio_periodico"); setSelectedItem(null); setShowMobileSidebar(false); }}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "relatorio_periodico" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8698,9 +8776,10 @@ function limparUsuariosDuplicados() {
                     </div>
                     <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold ${activeTab === "relatorio_periodico" ? "bg-white/20 text-white" : "bg-white/5 text-gray-400 group-hover:text-[#FF5022]"}`}>DB</span>
                   </button>
+                  )}
 
                   {/* Controle de Incidentes */}
-                  {hasPermissionToView("controle_incidentes") && (
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "controle_incidentes") && (
                   <button
                     onClick={() => { setActiveTab("controle_incidentes"); setSelectedItem(null); setShowMobileSidebar(false); }}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "controle_incidentes" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8714,14 +8793,14 @@ function limparUsuariosDuplicados() {
                   )}
 
                   {/* INCIDENTES & CAMPO */}
-                  {(hasPermissionToView("atenuacoes") || hasPermissionToView("testes_campo") || hasPermissionToView("atuacoes_geral") || hasPermissionToView("troca_cabo")) && (
+                  {(hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "atenuacoes") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "testes_campo") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "atuacoes_geral") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "troca_cabo")) && (
                     <div className="pt-2">
                       <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Incidentes & Campo</span>
                     </div>
                   )}
 
                   {/* Atenuações */}
-                  {hasPermissionToView("atenuacoes") && (
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "atenuacoes") && (
                     <button
                       onClick={() => { setActiveTab("atenuacoes"); setSelectedItem(null); setShowMobileSidebar(false); }}
                       className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "atenuacoes" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8734,7 +8813,7 @@ function limparUsuariosDuplicados() {
                   )}
 
                   {/* Testes de Campo */}
-                  {hasPermissionToView("testes_campo") && (
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "testes_campo") && (
                     <button
                       onClick={() => { setActiveTab("testes_campo"); setSelectedItem(null); setShowMobileSidebar(false); }}
                       className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "testes_campo" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8747,7 +8826,7 @@ function limparUsuariosDuplicados() {
                   )}
 
                   {/* Atuações */}
-                  {hasPermissionToView("atuacoes_geral") && (
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "atuacoes_geral") && (
                     <button
                       onClick={() => { setActiveTab("atuacoes_geral"); setSelectedItem(null); setShowMobileSidebar(false); }}
                       className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "atuacoes_geral" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
@@ -8760,74 +8839,100 @@ function limparUsuariosDuplicados() {
                   )}
 
                   {/* Troca de Cabo */}
-                  <button
-                    onClick={() => { setActiveTab("troca_cabo"); setSelectedItem(null); setShowMobileSidebar(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "troca_cabo" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                       <Cable className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "troca_cabo" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                       <span>Troca de Cabo</span>
-                    </div>
-                  </button>
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "troca_cabo") && (
+                    <button
+                      onClick={() => { setActiveTab("troca_cabo"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "troca_cabo" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                         <Cable className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "troca_cabo" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                         <span>Troca de Cabo</span>
+                      </div>
+                    </button>
+                  )}
 
                   {/* MAPEAMENTO DE REDE */}
-                  <div className="pt-2">
-                    <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Mapeamento de Rede</span>
-                  </div>
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "bypass") && (
+                    <>
+                      <div className="pt-2">
+                        <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Mapeamento de Rede</span>
+                      </div>
 
-                  {/* Bypass */}
-                  <button
-                    onClick={() => { setActiveTab("bypass"); setSelectedItem(null); setShowMobileSidebar(false); }}
-                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "bypass" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                       <Radio className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "bypass" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                       <span>Bypass</span>
-                    </div>
-                  </button>
+                      {/* Bypass */}
+                      <button
+                        onClick={() => { setActiveTab("bypass"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "bypass" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                           <Radio className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "bypass" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                           <span>Bypass</span>
+                        </div>
+                      </button>
+                    </>
+                  )}
 
                   {/* Externos */}
-                  <div className="pt-2">
-                    <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Externos</span>
-                  </div>
-
-                  {/* Entroncamentos */}
-                  {hasPermissionToView("entroncamentos") && (
-                    <button
-                      onClick={() => { setActiveTab("entroncamentos"); setSelectedItem(null); setShowMobileSidebar(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "entroncamentos" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                         <FileSpreadsheet className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "entroncamentos" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                         <span>Entroncamentos</span>
+                  {(hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "entroncamentos") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "camada_optica") || hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "otdr")) && (
+                    <>
+                      <div className="pt-2">
+                        <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Externos</span>
                       </div>
-                    </button>
+
+                      {/* Entroncamentos */}
+                      {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "entroncamentos") && (
+                        <button
+                          onClick={() => { setActiveTab("entroncamentos"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "entroncamentos" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                             <FileSpreadsheet className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "entroncamentos" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                             <span>Entroncamentos</span>
+                          </div>
+                        </button>
+                      )}
+
+                      {/* Camada Óptica */}
+                      {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "camada_optica") && (
+                        <button
+                          onClick={() => { setActiveTab("camada_optica"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "camada_optica" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                             <Layers className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "camada_optica" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                             <span>Camada Óptica</span>
+                          </div>
+                        </button>
+                      )}
+
+                      {/* Planejamento OTDR */}
+                      {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "otdr") && (
+                        <button
+                          onClick={() => { setActiveTab("otdr"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "otdr" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                        >
+                          <div className="flex items-center gap-2.5">
+                             <Activity className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "otdr" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                             <span>Planejamento OTDR</span>
+                          </div>
+                        </button>
+                      )}
+                    </>
                   )}
 
-                  {/* Camada Óptica */}
-                  {hasPermissionToView("camada_optica") && (
-                    <button
-                      onClick={() => { setActiveTab("camada_optica"); setSelectedItem(null); setShowMobileSidebar(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "camada_optica" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                         <Layers className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "camada_optica" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                         <span>Camada Óptica</span>
-                      </div>
-                    </button>
-                  )}
-
-                  {/* Planejamento OTDR */}
-                  {hasPermissionToView("otdr") && (
-                    <button
-                      onClick={() => { setActiveTab("otdr"); setSelectedItem(null); setShowMobileSidebar(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "otdr" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                         <Activity className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "otdr" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                         <span>Planejamento OTDR</span>
-                      </div>
-                    </button>
+                  {/* Seção Administrador Mobile */}
+                  {hasModuleAccess(currentUser?.permissions, currentUser?.nivel, "admin") && (
+                    <div className="pt-2 border-t border-gray-800 mt-2">
+                      <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Administração</span>
+                      <button
+                        onClick={() => { setActiveTab("admin"); setSelectedItem(null); setShowMobileSidebar(false); }}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs tracking-wide transition cursor-pointer group ${activeTab === "admin" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                           <UserCheck className={`w-4 h-4 shrink-0 transition-colors ${activeTab === "admin" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                           <span>Gerenciar Usuários</span>
+                        </div>
+                      </button>
+                    </div>
                   )}
               </nav>
             </div>
@@ -8871,10 +8976,12 @@ function limparUsuariosDuplicados() {
           {/* Menus do Sistema */}
           <nav className="p-4 space-y-1.5 flex-1">
              {/* GESTÃO GERAL */}
-             {isSidebarCollapsed ? (
-                <div className="border-t border-gray-800 my-2" />
-             ) : (
-                <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Gestão Geral</span>
+             {(hasPermissionToView("avisos") || hasPermissionToView("relatorio_periodico") || hasPermissionToView("controle_incidentes")) && (
+               isSidebarCollapsed ? (
+                  <div className="border-t border-gray-800 my-2" />
+               ) : (
+                  <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono block mb-1">Gestão Geral</span>
+               )
              )}
              
              {/* Opção: Painel de Avisos */}
@@ -9077,22 +9184,20 @@ function limparUsuariosDuplicados() {
              )}
 
              {/* Seção Administrador */}
-             {currentUser.permissions.admin?.visualizar && (
+             {hasPermissionToView("admin") && (
                <div className="pt-4 space-y-1.5 border-t border-gray-800 mt-3">
                  {!isSidebarCollapsed && (
                    <span className="text-[9px] uppercase font-bold text-gray-400 px-2 tracking-wider font-mono">Administração</span>
                  )}
 
-                  {currentUser.permissions.admin?.visualizar && (
-                    <button
-                      onClick={() => { setActiveTab("admin"); setSelectedItem(null); }}
-                      className={`w-full flex items-center ${isSidebarCollapsed ? "justify-center px-1 py-2.5" : "gap-2.5 px-3 py-2"} rounded-xl text-xs tracking-wide transition-all cursor-pointer group ${activeTab === "admin" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
-                      title={isSidebarCollapsed ? "Gerenciar Usuários" : undefined}
-                    >
-                      <UserCheck className={`w-4.5 h-4.5 shrink-0 transition-colors ${activeTab === "admin" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
-                      {!isSidebarCollapsed && <span className="truncate">Gerenciar Usuários</span>}
-                    </button>
-                  )}
+                 <button
+                   onClick={() => { setActiveTab("admin"); setSelectedItem(null); }}
+                   className={`w-full flex items-center ${isSidebarCollapsed ? "justify-center px-1 py-2.5" : "gap-2.5 px-3 py-2"} rounded-xl text-xs tracking-wide transition-all cursor-pointer group ${activeTab === "admin" ? "bg-[#FF5022] text-white font-semibold shadow-sm" : "text-gray-400 hover:text-[#FF5022] hover:bg-[#FF5022]/10 font-medium"}`}
+                   title={isSidebarCollapsed ? "Gerenciar Usuários" : undefined}
+                 >
+                   <UserCheck className={`w-4.5 h-4.5 shrink-0 transition-colors ${activeTab === "admin" ? "text-white" : "text-gray-400 group-hover:text-[#FF5022]"}`} />
+                   {!isSidebarCollapsed && <span className="truncate">Gerenciar Usuários</span>}
+                 </button>
                </div>
              )}
           </nav>
@@ -9155,7 +9260,7 @@ function limparUsuariosDuplicados() {
       {successToast && (
         <div
           id="toast-success"
-          className="fixed bottom-6 right-6 z-50 max-w-md py-2 px-4 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg shadow-lg flex items-center justify-between gap-3 text-xs font-medium animate-fade-in"
+          className="fixed bottom-6 right-6 z-[70] max-w-md py-2 px-4 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg shadow-lg flex items-center justify-between gap-3 text-xs font-medium animate-fade-in"
         >
           <div className="flex items-center gap-2">
             <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -13395,6 +13500,8 @@ function limparUsuariosDuplicados() {
                   setShowConfirmDeleteUserModal={setShowConfirmDeleteUserModal}
                   setUserToDelete={setUserToDelete}
                   setSuccessToast={setSuccessToast}
+                  currentUser={currentUser}
+                  setCurrentUser={setCurrentUser}
                 />
               );
             }
@@ -13791,6 +13898,7 @@ function limparUsuariosDuplicados() {
                   )}
                   <PainelAvisos
                     avisos={avisos}
+                    setAvisos={setAvisos}
                     usersList={usersList}
                     currentUser={currentUser}
                     onAdd={handleAddAviso}

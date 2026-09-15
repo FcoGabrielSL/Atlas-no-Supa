@@ -256,10 +256,23 @@ async function startServer() {
         "contato@franciscogabriel.com.br"
       ];
       if (staticAdmins.includes(queryEmail)) {
+        let sbId: any = undefined;
+        try {
+          const { data: foundSb } = await supabase
+            .from("Tb_Users")
+            .select("id")
+            .ilike("email", queryEmail)
+            .maybeSingle();
+          if (foundSb?.id) {
+            sbId = foundSb.id;
+          }
+        } catch (_) {}
+
         return res.json({
           success: true,
           authorized: true,
           user: {
+            id: sbId,
             email: queryEmail,
             nome: "Francisco",
             sobrenome: "Gabriel",

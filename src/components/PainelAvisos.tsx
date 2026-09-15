@@ -35,17 +35,47 @@ import {
   Sparkles,
   RotateCcw,
   MessageSquare,
-  Send
+  Send,
+  Pencil,
+  Share2,
+  MessageCircle
 } from "lucide-react";
 import { UserConfig } from "../types";
 import { cn } from "../lib/utils";
 import { supabase } from "../supabaseClient";
-import { confirmarLeituraAvisoSupabase, insertComentarioAvisoSupabase } from "../services/supabaseDataService";
+import {
+  confirmarLeituraAvisoSupabase,
+  insertComentarioAvisoSupabase,
+  updateComentarioAvisoSupabase,
+  deleteComentarioAvisoSupabase
+} from "../services/supabaseDataService";
 
 export interface ComentarioAviso {
+  id?: number | string;
+  id_comentario?: number | string;
+  id_user?: number | string;
+  id_autor?: number | string;
   autor: string;
   data: string;
+  created_at?: string;
   texto: string;
+  tipo_acao?: string;
+  is_finalizacao?: boolean;
+}
+
+export interface DestinacaoAviso {
+  id?: number | string;
+  id_aviso?: number | string;
+  id_user?: number | string;
+  tipo_destino?: string;
+  lido?: boolean;
+  data_leitura?: string;
+  user?: {
+    id: number | string;
+    nome?: string;
+    sobrenome?: string;
+    email?: string;
+  } | null;
 }
 
 export interface Aviso {
@@ -63,12 +93,14 @@ export interface Aviso {
   dataCriacao: string;
   status?: string;
   lido?: string;
-  lido_por?: string[];
+  lido_por?: (string | number)[];
   concluido_por?: string[];
   concluidoPor?: string;
   id_autor?: number;
   autor_dados?: { nome?: string; sobrenome?: string; email?: string } | null;
   comentarios?: ComentarioAviso[] | string;
+  Tb_Comentarios?: any[];
+  destinacoes?: DestinacaoAviso[];
 }
 
 // Helper para formatar data e hora no padrão brasileiro DD/MM/AAAA HH:mm
@@ -108,7 +140,23 @@ export const formatarComentariosParaPlanilha = (comentarios: any): string => {
 // Helper para parsear comentários de forma segura e resiliente (suporta Array, JSON string ou Texto Plano do Sheets)
 export const parseComentarios = (raw: any): ComentarioAviso[] => {
   if (!raw) return [];
-  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw)) {
+    return raw.map((item: any) => {
+      if (typeof item === "string") {
+        return { autor: "Operador", data: "", texto: item };
+      }
+      return {
+        id: item.id || item.id_comentario,
+        id_comentario: item.id_comentario || item.id,
+        id_user: item.id_user || item.id_autor,
+        id_autor: item.id_autor || item.id_user,
+        autor: item.autor || "Operador",
+        data: item.data || item.created_at || "",
+        created_at: item.created_at || item.data || "",
+        texto: item.texto || ""
+      };
+    });
+  }
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     if (!trimmed) return [];
@@ -116,7 +164,23 @@ export const parseComentarios = (raw: any): ComentarioAviso[] => {
     // 1. Tenta interpretar como JSON
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.map((item: any) => {
+          if (typeof item === "string") {
+            return { autor: "Operador", data: "", texto: item };
+          }
+          return {
+            id: item.id || item.id_comentario,
+            id_comentario: item.id_comentario || item.id,
+            id_user: item.id_user || item.id_autor,
+            id_autor: item.id_autor || item.id_user,
+            autor: item.autor || "Operador",
+            data: item.data || item.created_at || "",
+            created_at: item.created_at || item.data || "",
+            texto: item.texto || ""
+          };
+        });
+      }
     } catch (_) {
       // Não é JSON, continua para parsear texto plano
     }
@@ -155,6 +219,7 @@ export const parseComentarios = (raw: any): ComentarioAviso[] => {
 
 interface PainelAvisosProps {
   avisos: Aviso[];
+  setAvisos?: React.Dispatch<React.SetStateAction<Aviso[]>>;
   usersList: UserConfig[];
   currentUser: UserConfig;
   onAdd: (aviso: Omit<Aviso, "id" | "dataCriacao" | "autor">) => void;
@@ -229,15 +294,74 @@ const parseToDate = (dateStr?: string): Date | null => {
 };
 
 // Funções utilitárias de limpeza de exibição (remoção de parênteses e e-mails)
-const cleanOperatorLabel = (raw?: string): string => {
-  if (!raw) return "";
+const cleanOperatorLabel = (raw?: any): string => {
+  if (!raw || typeof raw !== "string") return "";
   return raw.split('(')[0].trim();
 };
 
-const cleanTaskLabel = (raw?: string): string => {
-  if (!raw) return "";
+const cleanTaskLabel = (raw?: any): string => {
+  if (!raw || typeof raw !== "string") return "";
   return raw.replace(/\s*\(.*?\)\s*/g, '').trim();
 };
+
+// Sanitizador para garantir que a descrição exiba estritamente o texto original cadastrado,
+// removendo quaisquer textos de finalização ou fechamento que possam ter sido concatenados anteriormente.
+export const sanitizarDescricaoAviso = (conteudo?: string): string => {
+  if (!conteudo || typeof conteudo !== "string") return "";
+
+  // Corta blocos de finalização ou fechamento que foram concatenados no texto
+  const regexMarcadores = /(?:\n\s*\n|\n)*(?:💬|🔒|\*\*Comentários de Finalização|Comentários de Finalização|\*\*Comentários de Fechamento|Comentários de Fechamento|\[Finalização\]|\[Fechamento\])[\s\S]*$/i;
+
+  return conteudo.replace(regexMarcadores, "").trim();
+};
+
+// Extrai observação de finalização caso esteja concatenada na descrição de avisos legados
+export const extrairComentarioFinalizacaoDeConteudo = (conteudo?: string): ComentarioAviso | null => {
+  if (!conteudo || typeof conteudo !== "string") return null;
+  const match = /(?:💬\s*|🔒\s*)?\*\*(?:Comentários de Finalização|Comentários de Fechamento)(?:[^*:\n]*?por\s+([^*:\n]+))?(?:[^*:\n]*?em\s+([^*:\n]+))?:?\s*\*\*\s*\n+([\s\S]*)$/i.exec(conteudo);
+  if (match) {
+    const autor = (match[1] || "Operador").trim();
+    const data = (match[2] || "").trim();
+    const texto = (match[3] || "").trim();
+    if (texto) {
+      return {
+        autor,
+        data,
+        created_at: data,
+        texto: `[Finalização] ${texto}`,
+        tipo_acao: 'Finalização',
+        is_finalizacao: true
+      };
+    }
+  }
+  return null;
+};
+
+// Renderização estrita do conteúdo original, sem caixa amarela ou textos de finalização concatenados
+const renderConteudoLimpo = (conteudo?: string) => {
+  const limpo = sanitizarDescricaoAviso(conteudo);
+  if (!limpo) {
+    return <p className="text-slate-400 italic font-sans text-xs">Sem descrição informada.</p>;
+  }
+
+  const tokens = limpo.split(/(\*\*.*?\*\*)/g);
+  return (
+    <p className="whitespace-pre-wrap leading-relaxed text-slate-700 text-xs font-medium font-sans">
+      {tokens.map((token, tIdx) => {
+        if (token.startsWith("**") && token.endsWith("**")) {
+          return (
+            <strong key={tIdx} className="font-bold text-slate-900 dark:text-white">
+              {token.slice(2, -2)}
+            </strong>
+          );
+        }
+        return token;
+      })}
+    </p>
+  );
+};
+
+const renderConteudoComDestaque = renderConteudoLimpo;
 
 // Componente Dropdown Menu de Ações para Avisos (Kanban e Modal)
 interface AvisoDropdownMenuProps {
@@ -425,31 +549,29 @@ const ModalAcoesDropdown: React.FC<ModalAcoesDropdownProps> = ({
 
   return (
     <div className="relative inline-block text-left" ref={dropdownRef}>
-      {/* Gatilho Ações (Outline Laranja) */}
+      {/* Gatilho Ações Padronizado e Compacto */}
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
           setMenuAberto((prev) => !prev);
         }}
-        className="flex items-center justify-between gap-2 px-3.5 py-1.5 bg-white hover:bg-orange-50/60 border border-[#FF5022] text-[#FF5022] hover:text-[#e0451a] font-semibold text-xs rounded-md shadow-2xs transition-colors cursor-pointer"
+        className="h-8 px-3 text-xs font-medium rounded-md border transition-all duration-150 flex items-center gap-1.5 cursor-pointer shadow-sm bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
         aria-haspopup="true"
         aria-expanded={menuAberto}
       >
-        <span className="flex items-center gap-1.5">
-          <span
-            className={`w-2 h-2 rounded-full shrink-0 ${
-              userStage === "pendente"
-                ? "bg-[#FF5022]"
-                : userStage === "lida"
-                ? "bg-blue-500"
-                : "bg-green-600"
-            }`}
-          />
-          <span>Ações</span>
-        </span>
+        <span
+          className={`w-2 h-2 rounded-full shrink-0 ${
+            userStage === "pendente"
+              ? "bg-[#FF5022]"
+              : userStage === "lida"
+              ? "bg-blue-500"
+              : "bg-green-600"
+          }`}
+        />
+        <span>Ações</span>
         <ChevronDown
-          className={`w-3.5 h-3.5 text-[#FF5022] transition-transform duration-200 shrink-0 ${
+          className={`w-3.5 h-3.5 text-amber-700 transition-transform duration-200 shrink-0 ${
             menuAberto ? "rotate-180" : ""
           }`}
         />
@@ -621,6 +743,7 @@ const actionTourSteps = [
 
 export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   avisos,
+  setAvisos: setAvisosProp,
   usersList,
   currentUser,
   onAdd,
@@ -629,6 +752,17 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   onRefresh,
   isSaving
 }) => {
+  // Estado local sincronizado para resposta reativa imediata sem fetches globais
+  const [localAvisos, setLocalAvisos] = useState<Aviso[]>(avisos);
+
+  useEffect(() => {
+    setLocalAvisos(avisos);
+  }, [avisos]);
+
+  const setAvisos: React.Dispatch<React.SetStateAction<Aviso[]>> = (updaterOrValue) => {
+    setLocalAvisos(updaterOrValue);
+  };
+
   // Filters & State
   const [search, setSearch] = useState("");
   const [filterTipo, setFilterTipo] = useState<string>("todos");
@@ -646,6 +780,81 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedAviso, setSelectedAviso] = useState<Aviso | null>(null);
 
+  // Estados e Funções para WhatsApp e Gestão de Comentários
+  const [copiedWhatsApp, setCopiedWhatsApp] = useState(false);
+  const [comentariosModal, setComentariosModal] = useState<ComentarioAviso[]>([]);
+  const [editingCommentId, setEditingCommentId] = useState<string | number | null>(null);
+  const [editingCommentText, setEditingCommentText] = useState("");
+  const [actionToast, setActionToast] = useState<{ message: string; type?: "success" | "info" } | null>(null);
+
+  // Formatação monocromática e limpa para WhatsApp com caracteres Unicode (• e ▸)
+  const formatAvisoForWhatsApp = (aviso: any) => {
+    const dataFormatada = new Date(aviso.created_at || aviso.dataCriacao || Date.now()).toLocaleString('pt-BR', {
+      dateStyle: 'short',
+      timeStyle: 'short'
+    });
+
+    const tipoNormalizado = (aviso.tipo || 'Aviso').toLowerCase();
+    let tagCabecalho = 'NOVO AVISO';
+    
+    if (tipoNormalizado.includes('tarefa')) {
+      tagCabecalho = 'NOVA TAREFA';
+    } else if (tipoNormalizado.includes('particularidade')) {
+      tagCabecalho = 'NOVA PARTICULARIDADE';
+    }
+
+    const autorNome = aviso.autor_nome || (aviso.autor_dados?.nome ? `${aviso.autor_dados.nome} ${aviso.autor_dados.sobrenome || ""}`.trim() : "") || (typeof getAuthorDisplayName === "function" ? getAuthorDisplayName(aviso) : aviso.autor) || aviso.id_autor || 'Operador';
+    const rawId = String(aviso.id || '').replace(/^#/, '');
+    const descricaoLimpa = sanitizarDescricaoAviso(aviso.conteudo || aviso.texto || '');
+
+    return `*[ATLAS BACKBONE] - ${tagCabecalho}*\n\n` +
+           `• *ID:* #${rawId}\n` +
+           `• *Título:* ${aviso.titulo || aviso.descricao || 'Sem título'}\n` +
+           `• *Tipo:* ${aviso.tipo || 'Aviso'} | *Prioridade:* ${aviso.prioridade || 'Média'}\n` +
+           `• *Autor:* ${autorNome}\n` +
+           `• *Data/Hora:* ${dataFormatada}\n\n` +
+           `▸ *Descrição / Orientação:*\n${descricaoLimpa}\n\n` +
+           `_Mensagem gerada automaticamente via Atlas Backbone Brisanet_`;
+  };
+
+  // Manipulador que APENAS copia para a área de transferência sem abrir guia
+  const handleCopyWhatsApp = (aviso: any) => {
+    const texto = formatAvisoForWhatsApp(aviso);
+    navigator.clipboard.writeText(texto).then(() => {
+      setCopiedWhatsApp(true);
+      setActionToast({ message: "Mensagem formatada copiada para a área de transferência!", type: "success" });
+      setTimeout(() => setCopiedWhatsApp(false), 2000);
+    }).catch(err => {
+      console.warn("Falha ao copiar para o clipboard:", err);
+    });
+  };
+
+  // Auto-dismiss actionToast após 3.5 segundos
+  useEffect(() => {
+    if (actionToast) {
+      const timer = setTimeout(() => {
+        setActionToast(null);
+      }, 3500);
+      return () => clearTimeout(timer);
+    }
+  }, [actionToast]);
+
+  // Formatação completa de data e hora para cabeçalho
+  const formatarCriadoEm = (aviso: any): string => {
+    const raw = aviso.created_at || aviso.dataCriacao;
+    if (!raw) return "";
+    try {
+      const d = new Date(raw);
+      if (!isNaN(d.getTime())) {
+        return d.toLocaleString('pt-BR', {
+          dateStyle: 'short',
+          timeStyle: 'short'
+        });
+      }
+    } catch (_) {}
+    return formatarDataHoraBR(raw) || formatarDataBR(raw) || String(raw);
+  };
+
   // Instructor Mode States
   const [instructorMode, setInstructorMode] = useState(false);
   const [showInstructorCentral, setShowInstructorCentral] = useState(false);
@@ -660,6 +869,86 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   // Thread de Comentários no Modal de Detalhes
   const [novoComentarioTexto, setNovoComentarioTexto] = useState("");
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
+
+  // Sincronização e carregamento de comentários do banco Supabase ao abrir modal
+  useEffect(() => {
+    if (!showDetailModal || !selectedAviso?.id) return;
+
+    let isMounted = true;
+    const fetchCommentsFromDb = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("Tb_Comentarios")
+          .select("*")
+          .eq("id_aviso", selectedAviso.id)
+          .order("id_comentario", { ascending: true });
+
+        if (!error && isMounted) {
+          const rawList = data || [];
+          const mapped: ComentarioAviso[] = rawList.map((c: any) => {
+            let authorName = "Operador";
+            if (c.id_autor && usersList && usersList.length > 0) {
+              const u = usersList.find(usr => Number(usr.id) === Number(c.id_autor));
+              if (u) {
+                authorName = `${u.nome} ${u.sobrenome || ""}`.trim();
+              }
+            }
+            if (authorName === "Operador" && c.autor) {
+              authorName = c.autor;
+            }
+            const isFin = c.tipo_acao === "Finalização" || (typeof c.texto === "string" && c.texto.includes("[Finalização]"));
+            return {
+              id: c.id_comentario,
+              id_comentario: c.id_comentario,
+              id_user: c.id_autor,
+              id_autor: c.id_autor,
+              autor: authorName,
+              data: c.created_at || new Date().toISOString(),
+              created_at: c.created_at,
+              texto: c.texto,
+              tipo_acao: c.tipo_acao,
+              is_finalizacao: isFin
+            };
+          });
+
+          // Concatena se houver algum comentário local que não esteja no banco
+          const localParsed = parseComentarios(selectedAviso.comentarios);
+          const combined = [...mapped];
+          localParsed.forEach(loc => {
+            const exists = combined.some(cb => 
+              (loc.id_comentario && cb.id_comentario === loc.id_comentario) ||
+              (cb.texto.trim() === loc.texto.trim() && Math.abs(new Date(cb.data).getTime() - new Date(loc.data).getTime()) < 60000)
+            );
+            if (!exists) {
+              combined.push(loc);
+            }
+          });
+
+          const legacyFin = extrairComentarioFinalizacaoDeConteudo(selectedAviso.conteudo);
+          if (legacyFin) {
+            const exists = combined.some(cb => 
+              cb.texto.replace(/\[Finalização\]/gi, '').trim() === legacyFin.texto.replace(/\[Finalização\]/gi, '').trim()
+            );
+            if (!exists) {
+              combined.push(legacyFin);
+            }
+          }
+
+          setComentariosModal(combined);
+          setSelectedAviso(prev => prev ? { ...prev, comentarios: combined, Tb_Comentarios: combined } : prev);
+          if (setAvisos) {
+            setAvisos(prev => prev.map(a => a.id === selectedAviso.id ? { ...a, comentarios: combined, Tb_Comentarios: combined } : a));
+          }
+        }
+      } catch (_) {}
+    };
+
+    fetchCommentsFromDb();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [showDetailModal, selectedAviso?.id, usersList]);
 
   // Form State
   const [formTitulo, setFormTitulo] = useState("");
@@ -689,7 +978,10 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
   // Check if current user is admin
   const isAdmin = useMemo(() => {
-    return !!(
+    const role = String((currentUser as any)?.role || (currentUser as any)?.perfil || "").toLowerCase();
+    const isRoleAdmin = role.includes("admin") || role.includes("administrador");
+    return Boolean(
+      isRoleAdmin ||
       currentUser.permissions?.admin?.visualizar ||
       currentUser.permissions?.admin?.editar ||
       currentUser.permissions?.admin?.excluir ||
@@ -712,7 +1004,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   const openEdit = (aviso: Aviso) => {
     setSelectedAviso(aviso);
     setFormTitulo(aviso.titulo);
-    setFormConteudo(aviso.conteudo);
+    setFormConteudo(sanitizarDescricaoAviso(aviso.conteudo));
     setFormTipo(aviso.tipo as any);
     setFormPrioridade(aviso.prioridade as any);
     setFormDestino(aviso.destino as any);
@@ -723,6 +1015,26 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   // Open Detail Modal
   const openDetail = (aviso: Aviso) => {
     setSelectedAviso(aviso);
+    const initialComments = Array.isArray(aviso.comentarios) && aviso.comentarios.length > 0
+      ? [...aviso.comentarios]
+      : (Array.isArray((aviso as any).Tb_Comentarios) && (aviso as any).Tb_Comentarios.length > 0
+          ? parseComentarios((aviso as any).Tb_Comentarios)
+          : parseComentarios(aviso.comentarios));
+
+    const legacyFin = extrairComentarioFinalizacaoDeConteudo(aviso.conteudo);
+    if (legacyFin) {
+      const already = initialComments.some(c =>
+        c.texto.replace(/\[Finalização\]/gi, '').trim() === legacyFin.texto.replace(/\[Finalização\]/gi, '').trim()
+      );
+      if (!already) {
+        initialComments.push(legacyFin);
+      }
+    }
+
+    setComentariosModal(initialComments);
+    setEditingCommentId(null);
+    setEditingCommentText("");
+    setCopiedWhatsApp(false);
     setShowReadTrackerList(false);
     setShowTaskCompletionTrackerList(false);
     setNovoComentarioTexto("");
@@ -831,8 +1143,9 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
       }
     }
     // Se aviso.autor tiver o formato "Operador #46", busca o usuário pelo ID 46
-    if (aviso.autor && aviso.autor.includes("Operador #") && usersList && usersList.length > 0) {
-      const match = aviso.autor.match(/\d+/);
+    const autorStr = typeof aviso.autor === "string" ? aviso.autor : String(aviso.autor || "");
+    if (autorStr && autorStr.includes("Operador #") && usersList && usersList.length > 0) {
+      const match = autorStr.match(/\d+/);
       if (match) {
         const numId = Number(match[0]);
         const found = usersList.find(u => Number(u.id) === numId);
@@ -842,25 +1155,26 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
         }
       }
     }
-    return aviso.autor || "Sistema";
+    return autorStr || "Sistema";
   };
 
-  // Check if current user is the author of a notice
-  const isNoticeAuthor = (aviso: Aviso) => {
-    const authorDisplayName = getAuthorDisplayName(aviso).toLowerCase().trim();
-    const curAuthor = currentAuthorName.toLowerCase().trim();
-    if (authorDisplayName === curAuthor) return true;
-    if ((aviso.autor || "").toLowerCase().trim() === curAuthor) return true;
-    if (currentUser?.id && aviso.id_autor && Number(currentUser.id) === Number(aviso.id_autor)) return true;
+  // Check if current user is the author of a notice (estrito por ID do autor)
+  const isNoticeAuthor = (aviso: Aviso): boolean => {
+    if (!aviso) return false;
+    if (currentUser?.id != null && aviso.id_autor != null && String(aviso.id_autor).trim() !== "") {
+      return Number(currentUser.id) === Number(aviso.id_autor);
+    }
     return false;
   };
 
-  // Check if current user has permission to edit or delete
-  const canEditOrDelete = (aviso: Aviso) => {
-    return isAdmin || isNoticeAuthor(aviso);
+  // Trava de permissão estrita: apenas o autor do registro ou Administrador
+  const canEditOrDelete = (aviso: Aviso): boolean => {
+    if (!aviso) return false;
+    if (isAdmin) return true;
+    return isNoticeAuthor(aviso);
   };
 
-  // Check if a user has read this specific notice (com suporte prioritário a lido_por: UUIDs/emails)
+  // Check if a user has read this specific notice (com suporte prioritário a Tb_Destinacoes e lido_por)
   const hasUserReadNotice = (
     aviso: Aviso,
     userOrEmail: UserConfig | { id?: string | number; email?: string } | string
@@ -869,6 +1183,18 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
     const targetId = typeof userOrEmail === "object" && userOrEmail?.id ? String(userOrEmail.id).trim() : "";
     const targetEmail = (typeof userOrEmail === "string" ? userOrEmail : userOrEmail?.email || "").toLowerCase().trim();
+
+    // 0. Verificação direta em Tb_Destinacoes (relacional do Supabase)
+    if (Array.isArray(aviso.destinacoes) && aviso.destinacoes.length > 0) {
+      const readInDest = aviso.destinacoes.some(d => {
+        if (!d.lido) return false;
+        if (targetId && String(d.id_user) === targetId) return true;
+        const destEmail = d.user?.email?.toLowerCase().trim();
+        if (targetEmail && destEmail === targetEmail) return true;
+        return false;
+      });
+      if (readInDest) return true;
+    }
 
     // 1. Verificação prioritária pelo array lido_por (strings/UUIDs)
     if (Array.isArray(aviso.lido_por) && aviso.lido_por.length > 0) {
@@ -937,240 +1263,311 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
     }
   };
 
-  // Action: Marcar como Lido / Confirmar Leitura (Recibo de Leitura via Tb_Destinacoes)
-  const handleConfirmarLeitura = async (aviso: Aviso) => {
-    const userId = currentUser?.id ? String(currentUser.id).trim() : "";
-    const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
+  // 1. Resolução e Validação Obrigatória do id_user & Confirmação de Leitura
+  const handleConfirmarLeitura = async (avisoIdOrTarget: string | number | Aviso) => {
+    try {
+      const avisoId: string | number = typeof avisoIdOrTarget === "object" && avisoIdOrTarget !== null ? (avisoIdOrTarget as Aviso).id : (avisoIdOrTarget as string | number);
 
-    // Normaliza o array lido_por existente
-    let currentLidoPor: string[] = [];
-    if (Array.isArray(aviso.lido_por)) {
-      currentLidoPor = [...aviso.lido_por.map(String)];
-    } else if (aviso.lido && typeof aviso.lido === "string") {
-      currentLidoPor = aviso.lido
-        .split(",")
-        .map(e => e.trim())
-        .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
-    }
+      // Resolução ativa do ID do usuário logado através das fontes disponíveis
+      let resolvedUserId: any = currentUser?.id;
 
-    // Injeta o user.id e o user.email no array lido_por sem duplicidades
-    if (userId && !currentLidoPor.some(val => val === userId)) {
-      currentLidoPor.push(userId);
-    }
-    if (userEmail && !currentLidoPor.some(val => val.toLowerCase() === userEmail)) {
-      currentLidoPor.push(userEmail);
-    }
+      // 1.1 Se o ID em currentUser não for um número válido, busca na lista global de usuários por e-mail
+      if (!resolvedUserId || isNaN(Number(resolvedUserId))) {
+        const userEmail = currentUser?.email?.toLowerCase().trim();
+        if (userEmail && usersList?.length) {
+          const matched = usersList.find(u => u.email?.toLowerCase().trim() === userEmail);
+          if (matched?.id && !isNaN(Number(matched.id))) {
+            resolvedUserId = matched.id;
+          }
+        }
+      }
 
-    // REGRA CRÍTICA DE ESTADO GLOBAL:
-    // Se o aviso for para "Todos", o status global NÃO é alterado (mantém "Aberto" para não concluir para os outros).
-    // Apenas se for aviso "Individual", o status pode mudar para "Visualizado".
-    const newStatus = aviso.destino === "Todos"
-      ? (aviso.status || "Aberto")
-      : ((aviso.status || "Aberto") === "Aberto" ? "Visualizado" : aviso.status);
+      // 1.2 Se ainda não possuir ID numérico, busca ativamente em Tb_Users no Supabase via e-mail da sessão
+      if (!resolvedUserId || isNaN(Number(resolvedUserId))) {
+        try {
+          const authUser = (await supabase.auth.getUser())?.data?.user;
+          const searchEmail = currentUser?.email?.toLowerCase().trim() || authUser?.email?.toLowerCase().trim();
+          if (searchEmail) {
+            const { data: tbUser } = await supabase
+              .from("Tb_Users")
+              .select("id")
+              .ilike("email", searchEmail)
+              .maybeSingle();
 
-    const updated: Aviso = {
-      ...aviso,
-      lido_por: currentLidoPor,
-      lido: currentLidoPor.join(","), // retrocompatibilidade para planilhas/tabelas
-      status: newStatus
-    };
+            if (tbUser?.id && !isNaN(Number(tbUser.id))) {
+              resolvedUserId = tbUser.id;
+            }
+          }
+        } catch (fetchErr) {
+          console.warn("Falha ao resolver id do usuário em Tb_Users:", fetchErr);
+        }
+      }
 
-    if (showDetailModal && selectedAviso?.id === aviso.id) {
-      setSelectedAviso(updated);
-    } else {
+      // Validação rígida de segurança antes de disparar a query
+      const userIdNum = Number(resolvedUserId || currentUser?.id || (currentUser as any)?.user?.id);
+
+      if (!userIdNum || isNaN(userIdNum)) {
+        console.error("Erro: Usuário não identificado/ID nulo.", currentUser);
+        alert("Sua sessão não possui um ID válido. Por favor, recarregue a página.");
+        return;
+      }
+
+      // Descobre o tipo_destino do aviso para satisfazer a constraint NOT NULL de Tb_Destinacoes
+      const targetAviso = typeof avisoIdOrTarget === "object" && avisoIdOrTarget !== null
+        ? avisoIdOrTarget
+        : avisos.find(a => a.id === avisoId || String(a.id) === String(avisoId));
+
+      const tipoDestino = targetAviso?.destino === "Individual" ? "Individual" : "Todos";
+
+      // Envia a requisição para o Supabase apenas após confirmar que id_user é um número válido e incluindo tipo_destino
+      const { error } = await supabase
+        .from('Tb_Destinacoes')
+        .upsert(
+          {
+            id_aviso: avisoId,
+            id_user: userIdNum,
+            tipo_destino: tipoDestino,
+            lido: true
+          },
+          { onConflict: 'id_aviso, id_user' }
+        );
+
+      if (error) throw error;
+
+      // 3. Cria a nova destinação com os dados do usuário para atualização local pontual
+      const novaDestinacao: DestinacaoAviso = {
+        id_aviso: avisoId,
+        id_user: userIdNum,
+        tipo_destino: tipoDestino,
+        lido: true,
+        user: {
+          id: userIdNum,
+          nome: currentUser?.nome || "",
+          sobrenome: currentUser?.sobrenome || "",
+          email: currentUser?.email || ""
+        }
+      };
+
+      // Atualiza a propriedade destinacoes e lido_por do aviso no estado local pontualmente, sem disparar re-renderizações no componente pai App
+      setLocalAvisos(prev => prev.map(a => {
+        if (a.id === avisoId || String(a.id) === String(avisoId)) {
+          const currentLidos = Array.isArray(a.lido_por) ? a.lido_por : [];
+          const lidosAtualizados = Array.from(new Set([...currentLidos.map(Number).filter(n => !isNaN(n)), userIdNum]));
+
+          const currentDest = Array.isArray(a.destinacoes) ? a.destinacoes : [];
+          const hasDest = currentDest.some(d => Number(d.id_user) === userIdNum);
+          const updatedDest = hasDest
+            ? currentDest.map(d => Number(d.id_user) === userIdNum ? { ...d, lido: true, user: d.user || novaDestinacao.user } : d)
+            : [...currentDest, novaDestinacao];
+
+          return {
+            ...a,
+            lido_por: lidosAtualizados,
+            lido: lidosAtualizados.join(","),
+            destinacoes: updatedDest
+          };
+        }
+        return a;
+      }));
+
+      // Atualiza também selectedAviso se estiver aberto para que o modal reflita a leitura imediatamente
+      setSelectedAviso(prev => {
+        if (prev && (prev.id === avisoId || String(prev.id) === String(avisoId))) {
+          const currentLidos = Array.isArray(prev.lido_por) ? prev.lido_por : [];
+          const lidosAtualizados = Array.from(new Set([...currentLidos.map(Number).filter(n => !isNaN(n)), userIdNum]));
+          const currentDest = Array.isArray(prev.destinacoes) ? prev.destinacoes : [];
+          const hasDest = currentDest.some(d => Number(d.id_user) === userIdNum);
+          const updatedDest = hasDest
+            ? currentDest.map(d => Number(d.id_user) === userIdNum ? { ...d, lido: true, user: d.user || novaDestinacao.user } : d)
+            : [...currentDest, novaDestinacao];
+
+          return {
+            ...prev,
+            lido_por: lidosAtualizados,
+            lido: lidosAtualizados.join(","),
+            destinacoes: updatedDest
+          };
+        }
+        return prev;
+      });
+
+      // Fecha o modal de detalhes de forma segura
       setSelectedAviso(null);
       setShowDetailModal(false);
-    }
 
-    // 1. Persistência segura em Tb_Destinacoes com APENAS colunas existentes (id_aviso, id_user, tipo_destino, lido)
-    try {
-      const numericUserId = Number(currentUser?.id) || 0;
-      if (numericUserId > 0) {
-        await supabase
-          .from("Tb_Destinacoes")
-          .upsert(
-            {
-              id_aviso: aviso.id,
-              id_user: numericUserId,
-              tipo_destino: aviso.destino === "Individual" ? "Individual" : "Todos",
-              lido: true
-            },
-            { onConflict: "id_aviso, id_user" }
-          );
-      } else if (userEmail) {
-        await confirmarLeituraAvisoSupabase(aviso.id, userEmail);
-      }
-    } catch (destErr) {
-      console.warn("[Tb_Destinacoes upsert warning]", destErr);
+    } catch (err) {
+      console.error("Erro ao confirmar leitura:", err);
     }
-
-    // 2. Atualização isolada de status em Tb_Avisos usando a chave primária correta (id_aviso)
-    try {
-      if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
-        await updateStatus(aviso.id, newStatus);
-      }
-    } catch (sbErr) {
-      console.warn("[Tb_Avisos update status warning]", sbErr);
-    }
-
-    onEdit(updated);
   };
 
   const handleMarkAsRead = handleConfirmarLeitura;
 
   // Action: Ler e Concluir (Atualiza lido_por E concluido_por com user.id/email e move para Concluídas)
   const handleLerEConcluir = async (aviso: Aviso) => {
-    const userId = currentUser?.id ? String(currentUser.id).trim() : "";
-    const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
+    try {
+      const userId = currentUser?.id ? String(currentUser.id).trim() : "";
+      const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
 
-    // 1. Array de lido_por
-    let currentLidoPor: string[] = [];
-    if (Array.isArray(aviso.lido_por)) {
-      currentLidoPor = [...aviso.lido_por.map(String)];
-    } else if (aviso.lido && typeof aviso.lido === "string") {
-      currentLidoPor = aviso.lido
-        .split(",")
-        .map(e => e.trim())
-        .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
-    }
-    if (userId && !currentLidoPor.includes(userId)) currentLidoPor.push(userId);
-    if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) currentLidoPor.push(userEmail);
-
-    // 2. Array de concluido_por
-    let currentConcluidoPor: string[] = [];
-    if (Array.isArray(aviso.concluido_por)) {
-      currentConcluidoPor = [...aviso.concluido_por.map(String)];
-    } else if (aviso.concluidoPor) {
-      const raw = String(aviso.concluidoPor).trim();
-      if (raw.startsWith("[") && raw.endsWith("]")) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
-        } catch (_) {}
+      // 1. Array de lido_por
+      let currentLidoPor: string[] = [];
+      if (Array.isArray(aviso.lido_por)) {
+        currentLidoPor = [...aviso.lido_por.map(String)];
+      } else if (aviso.lido && typeof aviso.lido === "string") {
+        currentLidoPor = aviso.lido
+          .split(",")
+          .map(e => e.trim())
+          .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
       }
-      if (currentConcluidoPor.length === 0) {
-        currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+      if (userId && !currentLidoPor.includes(userId)) currentLidoPor.push(userId);
+      if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) currentLidoPor.push(userEmail);
+
+      // 2. Array de concluido_por
+      let currentConcluidoPor: string[] = [];
+      if (Array.isArray(aviso.concluido_por)) {
+        currentConcluidoPor = [...aviso.concluido_por.map(String)];
+      } else if (aviso.concluidoPor) {
+        const raw = String(aviso.concluidoPor).trim();
+        if (raw.startsWith("[") && raw.endsWith("]")) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
+          } catch (_) {}
+        }
+        if (currentConcluidoPor.length === 0) {
+          currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+        }
       }
-    }
-    if (userId && !currentConcluidoPor.includes(userId)) currentConcluidoPor.push(userId);
-    if (userEmail && !currentConcluidoPor.some(e => e.toLowerCase() === userEmail)) currentConcluidoPor.push(userEmail);
+      if (userId && !currentConcluidoPor.includes(userId)) currentConcluidoPor.push(userId);
+      if (userEmail && !currentConcluidoPor.some(e => e.toLowerCase() === userEmail)) currentConcluidoPor.push(userEmail);
 
-    const newStatus = aviso.destino === "Todos"
-      ? (aviso.status || "Aberto")
-      : "Concluído";
+      const newStatus = aviso.destino === "Todos"
+        ? (aviso.status || "Aberto")
+        : "Concluído";
 
-    const updated: Aviso = {
-      ...aviso,
-      lido_por: currentLidoPor,
-      lido: currentLidoPor.join(","),
-      concluido_por: currentConcluidoPor,
-      concluidoPor: currentConcluidoPor.join(","),
-      status: newStatus
-    };
+      const updated: Aviso = {
+        ...aviso,
+        lido_por: currentLidoPor,
+        lido: currentLidoPor.join(","),
+        concluido_por: currentConcluidoPor,
+        concluidoPor: currentConcluidoPor.join(","),
+        status: newStatus
+      };
 
-    if (showDetailModal && selectedAviso?.id === aviso.id) {
-      setSelectedAviso(updated);
-    } else {
+      // Fecha o modal automaticamente e atualiza o estado local reativo
       setSelectedAviso(null);
       setShowDetailModal(false);
-    }
 
-    try {
-      const numericUserId = Number(currentUser?.id) || 0;
-      if (numericUserId > 0) {
-        await supabase
-          .from("Tb_Destinacoes")
-          .upsert(
-            {
-              id_aviso: aviso.id,
-              id_user: numericUserId,
-              tipo_destino: aviso.destino === "Individual" ? "Individual" : "Todos",
-              lido: true
-            },
-            { onConflict: "id_aviso, id_user" }
-          );
-      } else if (userEmail) {
-        await confirmarLeituraAvisoSupabase(aviso.id, userEmail);
-      }
-      if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
-        await updateStatus(aviso.id, newStatus);
-      }
-    } catch (sbErr) {
-      console.warn("[Supabase] Aviso update ler e concluir:", sbErr);
-    }
+      setAvisos(prev => prev.map(a => a.id === updated.id ? updated : a));
 
-    onEdit(updated);
+      try {
+        let numericUserId = Number(currentUser?.id) || 0;
+        if (!numericUserId || isNaN(numericUserId)) {
+          const matched = usersList?.find(u => u.email?.toLowerCase().trim() === userEmail);
+          if (matched?.id && !isNaN(Number(matched.id))) {
+            numericUserId = Number(matched.id);
+          }
+        }
+
+        if (numericUserId > 0) {
+          await supabase
+            .from("Tb_Destinacoes")
+            .upsert(
+              {
+                id_aviso: aviso.id,
+                id_user: numericUserId,
+                tipo_destino: aviso.destino === "Individual" ? "Individual" : "Todos",
+                lido: true
+              },
+              { onConflict: "id_aviso, id_user" }
+            );
+        } else if (userEmail) {
+          await confirmarLeituraAvisoSupabase(aviso.id, userEmail);
+        }
+        if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
+          await updateStatus(aviso.id, newStatus);
+        }
+      } catch (sbErr) {
+        console.warn("[Supabase] Aviso update ler e concluir:", sbErr);
+      }
+
+      onEdit(updated);
+    } catch (err) {
+      console.error("Erro ao ler e concluir aviso:", err);
+    }
   };
 
   // Action: Reverter Conclusão (Remove o usuário de concluido_por e move de volta para Lidas / Em Andamento)
   const handleReverterConclusao = async (aviso: Aviso) => {
-    const userId = currentUser?.id ? String(currentUser.id).trim() : "";
-    const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
+    try {
+      const userId = currentUser?.id ? String(currentUser.id).trim() : "";
+      const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
 
-    // 1. Array atual de concluido_por
-    let currentConcluidoPor: string[] = [];
-    if (Array.isArray(aviso.concluido_por)) {
-      currentConcluidoPor = [...aviso.concluido_por.map(String)];
-    } else if (aviso.concluidoPor) {
-      const raw = String(aviso.concluidoPor).trim();
-      if (raw.startsWith("[") && raw.endsWith("]")) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
-        } catch (_) {}
+      // 1. Array atual de concluido_por
+      let currentConcluidoPor: string[] = [];
+      if (Array.isArray(aviso.concluido_por)) {
+        currentConcluidoPor = [...aviso.concluido_por.map(String)];
+      } else if (aviso.concluidoPor) {
+        const raw = String(aviso.concluidoPor).trim();
+        if (raw.startsWith("[") && raw.endsWith("]")) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
+          } catch (_) {}
+        }
+        if (currentConcluidoPor.length === 0) {
+          currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+        }
       }
-      if (currentConcluidoPor.length === 0) {
-        currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+
+      // 2. Filtra removendo o id e o email do usuário
+      const novoArrayConcluido = currentConcluidoPor.filter(
+        id => id !== userId && id.toLowerCase() !== userEmail
+      );
+
+      // 3. Garante que o usuário permaneça em lido_por (para que volte a figurar como lido / em andamento)
+      let currentLidoPor: string[] = [];
+      if (Array.isArray(aviso.lido_por)) {
+        currentLidoPor = [...aviso.lido_por.map(String)];
+      } else if (aviso.lido && typeof aviso.lido === "string") {
+        currentLidoPor = aviso.lido
+          .split(",")
+          .map(e => e.trim())
+          .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
       }
-    }
+      if (userId && !currentLidoPor.includes(userId)) currentLidoPor.push(userId);
+      if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) currentLidoPor.push(userEmail);
 
-    // 2. Filtra removendo o id e o email do usuário
-    const novoArrayConcluido = currentConcluidoPor.filter(
-      id => id !== userId && id.toLowerCase() !== userEmail
-    );
+      const newStatus = aviso.destino === "Todos"
+        ? (aviso.status || "Aberto")
+        : "Visualizado";
 
-    // 3. Garante que o usuário permaneça em lido_por (para que volte a figurar como lido / em andamento)
-    let currentLidoPor: string[] = [];
-    if (Array.isArray(aviso.lido_por)) {
-      currentLidoPor = [...aviso.lido_por.map(String)];
-    } else if (aviso.lido && typeof aviso.lido === "string") {
-      currentLidoPor = aviso.lido
-        .split(",")
-        .map(e => e.trim())
-        .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
-    }
-    if (userId && !currentLidoPor.includes(userId)) currentLidoPor.push(userId);
-    if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) currentLidoPor.push(userEmail);
+      const updated: Aviso = {
+        ...aviso,
+        concluido_por: novoArrayConcluido,
+        concluidoPor: novoArrayConcluido.join(","),
+        lido_por: currentLidoPor,
+        lido: currentLidoPor.join(","),
+        status: newStatus
+      };
 
-    const newStatus = aviso.destino === "Todos"
-      ? (aviso.status || "Aberto")
-      : "Visualizado";
-
-    const updated: Aviso = {
-      ...aviso,
-      concluido_por: novoArrayConcluido,
-      concluidoPor: novoArrayConcluido.join(","),
-      lido_por: currentLidoPor,
-      lido: currentLidoPor.join(","),
-      status: newStatus
-    };
-
-    if (showDetailModal && selectedAviso?.id === aviso.id) {
-      setSelectedAviso(updated);
-    } else {
+      // Fecha o modal automaticamente e atualiza o estado local reativo
       setSelectedAviso(null);
       setShowDetailModal(false);
-    }
 
-    try {
-      if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
-        await updateStatus(aviso.id, newStatus);
+      setAvisos(prev => prev.map(a => a.id === updated.id ? updated : a));
+
+      try {
+        if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
+          await updateStatus(aviso.id, newStatus);
+        }
+      } catch (sbErr) {
+        console.warn("[Supabase] Aviso update reverter conclusao:", sbErr);
       }
-    } catch (sbErr) {
-      console.warn("[Supabase] Aviso update reverter conclusao:", sbErr);
-    }
 
-    onEdit(updated);
+      onEdit(updated);
+    } catch (err) {
+      console.error("Erro ao reverter conclusão:", err);
+    }
   };
 
   // Action: Marcar como Resolvido / Concluído (Recipient of individual notice)
@@ -1182,105 +1579,113 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   };
 
   const executeMarkAsResolved = async (aviso: Aviso, comment?: string) => {
-    const userId = currentUser?.id ? String(currentUser.id).trim() : "";
-    const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
+    try {
+      const userId = currentUser?.id ? String(currentUser.id).trim() : "";
+      const userEmail = currentUser?.email ? currentUser.email.toLowerCase().trim() : "";
 
-    // Array de concluído
-    let currentConcluidoPor: string[] = [];
-    if (Array.isArray(aviso.concluido_por)) {
-      currentConcluidoPor = [...aviso.concluido_por.map(String)];
-    } else if (aviso.concluidoPor) {
-      const raw = String(aviso.concluidoPor).trim();
-      if (raw.startsWith("[") && raw.endsWith("]")) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
-        } catch (_) {}
+      // Array de concluído
+      let currentConcluidoPor: string[] = [];
+      if (Array.isArray(aviso.concluido_por)) {
+        currentConcluidoPor = [...aviso.concluido_por.map(String)];
+      } else if (aviso.concluidoPor) {
+        const raw = String(aviso.concluidoPor).trim();
+        if (raw.startsWith("[") && raw.endsWith("]")) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) currentConcluidoPor = parsed.map(String);
+          } catch (_) {}
+        }
+        if (currentConcluidoPor.length === 0) {
+          currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+        }
       }
-      if (currentConcluidoPor.length === 0) {
-        currentConcluidoPor = raw.split(",").map(e => e.trim()).filter(Boolean);
+
+      if (userId && !currentConcluidoPor.includes(userId)) {
+        currentConcluidoPor.push(userId);
       }
-    }
+      if (userEmail && !currentConcluidoPor.some(e => e.toLowerCase() === userEmail)) {
+        currentConcluidoPor.push(userEmail);
+      }
 
-    if (userId && !currentConcluidoPor.includes(userId)) {
-      currentConcluidoPor.push(userId);
-    }
-    if (userEmail && !currentConcluidoPor.some(e => e.toLowerCase() === userEmail)) {
-      currentConcluidoPor.push(userEmail);
-    }
+      // Array de lido (quem concluiu também leu)
+      let currentLidoPor: string[] = [];
+      if (Array.isArray(aviso.lido_por)) {
+        currentLidoPor = [...aviso.lido_por.map(String)];
+      } else if (aviso.lido && typeof aviso.lido === "string") {
+        currentLidoPor = aviso.lido
+          .split(",")
+          .map(e => e.trim())
+          .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
+      }
+      if (userId && !currentLidoPor.includes(userId)) {
+        currentLidoPor.push(userId);
+      }
+      if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) {
+        currentLidoPor.push(userEmail);
+      }
 
-    // Array de lido (quem concluiu também leu)
-    let currentLidoPor: string[] = [];
-    if (Array.isArray(aviso.lido_por)) {
-      currentLidoPor = [...aviso.lido_por.map(String)];
-    } else if (aviso.lido && typeof aviso.lido === "string") {
-      currentLidoPor = aviso.lido
-        .split(",")
-        .map(e => e.trim())
-        .filter(e => e && !["não", "nao", "sim"].includes(e.toLowerCase()));
-    }
-    if (userId && !currentLidoPor.includes(userId)) {
-      currentLidoPor.push(userId);
-    }
-    if (userEmail && !currentLidoPor.some(e => e.toLowerCase() === userEmail)) {
-      currentLidoPor.push(userEmail);
-    }
+      let updatedConteudo = sanitizarDescricaoAviso(aviso.conteudo);
+      const comentariosAtuais = parseComentarios(aviso.comentarios);
+      let updatedComentarios = comentariosAtuais;
+      if (comment && comment.trim() !== "") {
+        const novoComentario: ComentarioAviso = {
+          autor: currentAuthorName,
+          id_autor: currentUser?.id ? Number(currentUser.id) : undefined,
+          id_user: currentUser?.id ? Number(currentUser.id) : undefined,
+          data: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          texto: `[Finalização] ${comment.trim()}`,
+          tipo_acao: 'Finalização',
+          is_finalizacao: true
+        };
+        updatedComentarios = [...comentariosAtuais, novoComentario];
+      }
 
-    let updatedConteudo = aviso.conteudo;
-    const comentariosAtuais = parseComentarios(aviso.comentarios);
-    let updatedComentarios = comentariosAtuais;
-    if (comment && comment.trim() !== "") {
-      const todayString = new Date().toLocaleDateString("pt-BR") + " " + new Date().toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
-      updatedConteudo = `${aviso.conteudo}\n\n💬 **Comentários de Finalização por ${currentAuthorName} em ${todayString}:**\n${comment.trim()}`;
-      
-      const novoComentario: ComentarioAviso = {
-        autor: currentAuthorName,
-        data: new Date().toISOString(),
-        texto: `[Finalização] ${comment.trim()}`
+      // REGRA DE ESTADO ISOLADO:
+      // Clicar em "Concluir" em aviso de grupo ("Todos") não altera o status global para não concluir para os demais.
+      const newStatus = aviso.destino === "Todos"
+        ? (aviso.status || "Aberto")
+        : "Concluído";
+
+      const updated: Aviso = {
+        ...aviso,
+        conteudo: updatedConteudo,
+        comentarios: updatedComentarios,
+        Tb_Comentarios: updatedComentarios,
+        concluido_por: currentConcluidoPor,
+        concluidoPor: currentConcluidoPor.join(","),
+        lido_por: currentLidoPor,
+        lido: currentLidoPor.join(","),
+        status: newStatus
       };
-      updatedComentarios = [...comentariosAtuais, novoComentario];
-    }
 
-    // REGRA DE ESTADO ISOLADO:
-    // Clicar em "Concluir" em aviso de grupo ("Todos") não altera o status global para não concluir para os demais.
-    const newStatus = aviso.destino === "Todos"
-      ? (aviso.status || "Aberto")
-      : "Concluído";
-
-    const updated: Aviso = {
-      ...aviso,
-      conteudo: updatedConteudo,
-      comentarios: updatedComentarios,
-      concluido_por: currentConcluidoPor,
-      concluidoPor: currentConcluidoPor.join(","),
-      lido_por: currentLidoPor,
-      lido: currentLidoPor.join(","),
-      status: newStatus
-    };
-
-    if (showDetailModal && selectedAviso?.id === aviso.id) {
-      setSelectedAviso(updated);
-    } else {
+      // Fecha o modal automaticamente e atualiza o estado local reativo
       setSelectedAviso(null);
       setShowDetailModal(false);
-    }
 
-    try {
-      if (comment && comment.trim() !== "") {
-        await insertComentarioAvisoSupabase(
-          aviso.id,
-          currentAuthorName,
-          `[Finalização] ${comment.trim()}`
-        ).catch(() => {});
-      }
-      if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
-        await updateStatus(aviso.id, newStatus);
-      }
-    } catch (sbErr) {
-      console.warn("[Supabase] Aviso update mark as resolved:", sbErr);
-    }
+      setAvisos(prev => prev.map(a => a.id === updated.id ? updated : a));
 
-    onEdit(updated);
+      try {
+        if (comment && comment.trim() !== "") {
+          await insertComentarioAvisoSupabase(
+            aviso.id,
+            currentAuthorName,
+            `[Finalização] ${comment.trim()}`,
+            currentUser?.id ? Number(currentUser.id) : undefined,
+            'Finalização'
+          ).catch(() => {});
+        }
+        if (aviso.destino !== "Todos" && newStatus !== aviso.status) {
+          await updateStatus(aviso.id, newStatus);
+        }
+      } catch (sbErr) {
+        console.warn("[Supabase] Aviso update mark as resolved:", sbErr);
+      }
+
+      onEdit(updated);
+    } catch (err) {
+      console.error("Erro ao finalizar:", err);
+    }
   };
 
   // Action: Fechar Pendência (Author of individual notice or Admin)
@@ -1292,90 +1697,246 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   };
 
   const executeClosePendency = async (aviso: Aviso, comment?: string) => {
-    let updatedConteudo = aviso.conteudo;
-    if (comment && comment.trim() !== "") {
-      const todayString = new Date().toLocaleDateString("pt-BR") + " " + new Date().toLocaleTimeString("pt-BR", { hour: '2-digit', minute: '2-digit' });
-      updatedConteudo = `${aviso.conteudo}\n\n🔒 **Comentários de Fechamento por ${currentAuthorName} em ${todayString}:**\n${comment.trim()}`;
-      try {
-        await insertComentarioAvisoSupabase(
-          aviso.id,
-          currentAuthorName,
-          `[Fechamento] ${comment.trim()}`
-        ).catch(() => {});
-      } catch (_) {}
-    }
-
-    const updated: Aviso = {
-      ...aviso,
-      conteudo: updatedConteudo,
-      status: "Fechado"
-    };
-    setSelectedAviso(null);
-    setShowDetailModal(false);
-
     try {
-      await updateStatus(aviso.id, "Fechado");
-    } catch (e) {}
+      let updatedConteudo = sanitizarDescricaoAviso(aviso.conteudo);
+      const comentariosAtuais = parseComentarios(aviso.comentarios);
+      let updatedComentarios = comentariosAtuais;
+      if (comment && comment.trim() !== "") {
+        const novoComentario: ComentarioAviso = {
+          autor: currentAuthorName,
+          id_autor: currentUser?.id ? Number(currentUser.id) : undefined,
+          id_user: currentUser?.id ? Number(currentUser.id) : undefined,
+          data: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          texto: `[Fechamento] ${comment.trim()}`,
+          tipo_acao: 'Fechamento'
+        };
+        updatedComentarios = [...comentariosAtuais, novoComentario];
+        try {
+          await insertComentarioAvisoSupabase(
+            aviso.id,
+            currentAuthorName,
+            `[Fechamento] ${comment.trim()}`,
+            currentUser?.id ? Number(currentUser.id) : undefined,
+            'Fechamento'
+          ).catch(() => {});
+        } catch (_) {}
+      }
 
-    onEdit(updated);
+      const updated: Aviso = {
+        ...aviso,
+        conteudo: updatedConteudo,
+        comentarios: updatedComentarios,
+        Tb_Comentarios: updatedComentarios,
+        status: "Fechado"
+      };
+      setSelectedAviso(null);
+      setShowDetailModal(false);
+
+      setAvisos(prev => prev.map(a => a.id === updated.id ? updated : a));
+
+      try {
+        await updateStatus(aviso.id, "Fechado");
+      } catch (e) {}
+
+      onEdit(updated);
+    } catch (err) {
+      console.error("Erro ao fechar pendência:", err);
+    }
   };
 
-  // Action: Adicionar novo comentário na thread do aviso/particularidade
+  // 3. Blindagem Geral dos Botões do Modal: handleDelete
+  const handleDelete = async (avisoId?: string | number) => {
+    try {
+      const idToDelete = avisoId ? String(avisoId) : (deleteConfirmId || selectedAviso?.id);
+      if (!idToDelete) return;
+      setAvisos(prev => prev.filter(a => String(a.id) !== String(idToDelete)));
+      setDeleteConfirmId(null);
+      setSelectedAviso(null);
+      setShowDetailModal(false);
+      await onDelete(idToDelete);
+    } catch (err) {
+      console.error("Erro ao excluir aviso:", err);
+    }
+  };
+
+  // 3. Blindagem Geral dos Botões do Modal: handleAddComment
   const handleAddComment = async () => {
     if (!novoComentarioTexto.trim() || !selectedAviso) return;
 
     setIsSubmittingComment(true);
 
-    const autorNome = currentUser?.nome
-      ? `${currentUser.nome} ${currentUser.sobrenome || ""}`.trim()
-      : (currentUser?.email ? currentUser.email.split("@")[0] : currentAuthorName || "Operador");
-
-    const novoComentario: ComentarioAviso = {
-      autor: autorNome,
-      data: new Date().toISOString(),
-      texto: novoComentarioTexto.trim()
-    };
-
-    const comentariosAtuais = parseComentarios(selectedAviso.comentarios);
-    const arrayAtualizado = [...comentariosAtuais, novoComentario];
-
-    // 1. Formatação para Texto Plano (Sheets): [DD/MM/AAAA HH:mm] Nome: Texto do comentário
-    const stringFormatadaParaPlanilha = arrayAtualizado
-      .map((c) => {
-        const dataHora = formatarDataHoraBR(c.data) || new Date().toLocaleDateString("pt-BR") + " " + new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-        const autor = (c.autor || "Operador").trim();
-        const texto = (c.texto || "").trim();
-        return `[${dataHora}] ${autor}: ${texto}`;
-      })
-      .join("\n\n");
-
-    // 2. Persistência no Supabase (insere na tabela filha Tb_Comentarios com FK ON DELETE CASCADE e atualiza Tb_Avisos)
     try {
-      await insertComentarioAvisoSupabase(selectedAviso.id, autorNome, novoComentarioTexto.trim());
-      const { error: sbError } = await supabase
-        .from("Tb_Avisos")
-        .update({ comentarios: arrayAtualizado })
-        .eq("id", selectedAviso.id);
+      const autorNome = currentUser?.nome
+        ? `${currentUser.nome} ${currentUser.sobrenome || ""}`.trim()
+        : (currentUser?.email ? currentUser.email.split("@")[0] : currentAuthorName || "Operador");
 
-      if (sbError) {
-        console.warn("[Supabase] Tb_Avisos update comentarios warning:", sbError);
+      const authorIdNum = currentUser?.id ? Number(currentUser.id) : null;
+
+      const novoComentario: ComentarioAviso = {
+        autor: autorNome,
+        data: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        texto: novoComentarioTexto.trim(),
+        id_user: authorIdNum || undefined,
+        id_autor: authorIdNum || undefined
+      };
+
+      // 1. Inserção no Supabase na tabela Tb_Comentarios com id_autor
+      try {
+        const inserted = await insertComentarioAvisoSupabase(
+          selectedAviso.id,
+          autorNome,
+          novoComentarioTexto.trim(),
+          authorIdNum || undefined
+        );
+        if (inserted?.id_comentario) {
+          novoComentario.id = inserted.id_comentario;
+          novoComentario.id_comentario = inserted.id_comentario;
+        }
+      } catch (sbErr) {
+        console.warn("[Supabase] Tb_Comentarios insert warning:", sbErr);
       }
-    } catch (sbErr) {
-      console.warn("[Supabase] Tb_Avisos update comentarios exception:", sbErr);
+
+      const comentariosAtuais = comentariosModal.length > 0 ? comentariosModal : parseComentarios(selectedAviso.comentarios);
+      const arrayAtualizado = [...comentariosAtuais, novoComentario];
+
+      // 2. Persistência na Tb_Avisos
+      try {
+        await supabase
+          .from("Tb_Avisos")
+          .update({ comentarios: arrayAtualizado })
+          .eq("id", selectedAviso.id);
+      } catch (sbErr) {
+        console.warn("[Supabase] Tb_Avisos update comentarios warning:", sbErr);
+      }
+
+      // 3. Atualização local do modal e da lista
+      const updatedAviso: Aviso = {
+        ...selectedAviso,
+        comentarios: arrayAtualizado
+      };
+
+      setSelectedAviso(updatedAviso);
+      setComentariosModal(arrayAtualizado);
+      setNovoComentarioTexto("");
+
+      // Atualiza estado local pontual (sem re-fetch global)
+      setAvisos(prev => prev.map(a => a.id === selectedAviso.id ? updatedAviso : a));
+
+      // 4. Propagação para o App.tsx (atualiza estado global e cache local)
+      onEdit(updatedAviso);
+    } catch (err) {
+      console.error("Erro ao adicionar comentário:", err);
+    } finally {
+      setIsSubmittingComment(false);
     }
+  };
 
-    // 4. Atualização local do modal
-    const updatedAviso: Aviso = {
-      ...selectedAviso,
-      comentarios: arrayAtualizado
-    };
+  // Edição de comentário diretamente no Supabase e estado local
+  const handleSaveEditComment = async (comentario: ComentarioAviso, idx: number) => {
+    if (!editingCommentText.trim() || !selectedAviso) return;
+    setIsSubmittingComment(true);
+    try {
+      const updatedTexto = editingCommentText.trim();
+      const targetId = comentario.id_comentario || comentario.id;
 
-    setSelectedAviso(updatedAviso);
-    setNovoComentarioTexto("");
-    setIsSubmittingComment(false);
+      // 1. Atualiza no Supabase (Tb_Comentarios)
+      if (targetId) {
+        await updateComentarioAvisoSupabase(targetId, updatedTexto);
+      } else {
+        await supabase
+          .from("Tb_Comentarios")
+          .update({ texto: updatedTexto })
+          .eq("id_aviso", selectedAviso.id)
+          .eq("texto", comentario.texto);
+      }
 
-    // 5. Propagação para o App.tsx (atualiza estado global e cache local)
-    onEdit(updatedAviso);
+      // 2. Atualiza lista de comentários do modal
+      const updatedList = comentariosModal.map((c, i) => {
+        if (i === idx || (targetId && (c.id_comentario === targetId || c.id === targetId))) {
+          return { ...c, texto: updatedTexto };
+        }
+        return c;
+      });
+      setComentariosModal(updatedList);
+
+      // 3. Atualiza Tb_Avisos.comentarios
+      const updatedAviso: Aviso = {
+        ...selectedAviso,
+        comentarios: updatedList
+      };
+      setSelectedAviso(updatedAviso);
+      setAvisos(prev => prev.map(a => a.id === selectedAviso.id ? updatedAviso : a));
+      onEdit(updatedAviso);
+
+      try {
+        await supabase
+          .from("Tb_Avisos")
+          .update({ comentarios: updatedList })
+          .eq("id", selectedAviso.id);
+      } catch (_) {}
+
+      setEditingCommentId(null);
+      setEditingCommentText("");
+    } catch (err) {
+      console.error("Erro ao salvar comentário editado:", err);
+    } finally {
+      setIsSubmittingComment(false);
+    }
+  };
+
+  // Exclusão de comentário diretamente no Supabase e estado local
+  const handleDeleteComment = async (comentario: ComentarioAviso, idx: number) => {
+    if (!selectedAviso) return;
+    const confirmDelete = window.confirm ? window.confirm("Deseja realmente excluir este comentário?") : true;
+    if (!confirmDelete) return;
+
+    setIsSubmittingComment(true);
+    try {
+      const targetId = comentario.id_comentario || comentario.id;
+
+      // 1. Deleta do Supabase (Tb_Comentarios)
+      if (targetId) {
+        await deleteComentarioAvisoSupabase(targetId);
+      } else {
+        await supabase
+          .from("Tb_Comentarios")
+          .delete()
+          .eq("id_aviso", selectedAviso.id)
+          .eq("texto", comentario.texto);
+      }
+
+      // 2. Remove do estado local
+      const updatedList = comentariosModal.filter((c, i) => {
+        if (targetId) {
+          return c.id_comentario !== targetId && c.id !== targetId;
+        }
+        return i !== idx;
+      });
+      setComentariosModal(updatedList);
+
+      // 3. Atualiza Tb_Avisos.comentarios
+      const updatedAviso: Aviso = {
+        ...selectedAviso,
+        comentarios: updatedList
+      };
+      setSelectedAviso(updatedAviso);
+      setAvisos(prev => prev.map(a => a.id === selectedAviso.id ? updatedAviso : a));
+      onEdit(updatedAviso);
+
+      try {
+        await supabase
+          .from("Tb_Avisos")
+          .update({ comentarios: updatedList })
+          .eq("id", selectedAviso.id);
+      } catch (_) {}
+
+    } catch (err) {
+      console.error("Erro ao excluir comentário:", err);
+    } finally {
+      setIsSubmittingComment(false);
+    }
   };
 
   // Check if a user is coordinator or admin
@@ -1429,8 +1990,8 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
   };
 
   const visibleAvisos = useMemo(() => {
-    return avisos.filter(isNoticeVisible);
-  }, [avisos, currentAuthorName, currentUser.email, currentUser.id]);
+    return localAvisos.filter(isNoticeVisible);
+  }, [localAvisos, currentAuthorName, currentUser.email, currentUser.id]);
 
   // 3. Estágios de Leitura Individuais (Pendentes, Lidas, Concluídas):
   // - Vai para Concluídas: se aviso.concluido_por.includes(currentUser.id)
@@ -1503,10 +2064,104 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [visibleAvisos, usersList]);
 
+  // Helper para formatar o ID do aviso com a tag padronizada (ex: #av-2730)
+  const formatNoticeId = (id: string | number): string => {
+    if (id === undefined || id === null || id === "") return "";
+    const raw = String(id).trim();
+    if (raw.toLowerCase().startsWith("#av-")) return raw.toLowerCase();
+    if (raw.startsWith("#")) return `#av-${raw.replace(/^#/, "").toLowerCase()}`;
+    if (raw.toLowerCase().startsWith("av-")) return `#${raw.toLowerCase()}`;
+    return `#av-${raw}`;
+  };
+
+  // Helper para calcular total de visualizações de um aviso
+  const getNoticeReadCount = (aviso: Aviso): number => {
+    if (Array.isArray(aviso.destinacoes) && aviso.destinacoes.length > 0) {
+      const readInDest = aviso.destinacoes.filter(d => Boolean(d.lido)).length;
+      if (readInDest > 0) return readInDest;
+    }
+    if (Array.isArray(aviso.lido_por) && aviso.lido_por.length > 0) {
+      return aviso.lido_por.length;
+    }
+    if (aviso.lido === "Sim" || aviso.status === "Visualizado" || aviso.status === "Concluído") {
+      return 1;
+    }
+    return 0;
+  };
+
+  // Helper para calcular total de comentários registrados
+  const getNoticeCommentsCount = (aviso: Aviso): number => {
+    if (Array.isArray(aviso.comentarios) && aviso.comentarios.length > 0) {
+      return aviso.comentarios.length;
+    }
+    if (Array.isArray((aviso as any).Tb_Comentarios) && (aviso as any).Tb_Comentarios.length > 0) {
+      return (aviso as any).Tb_Comentarios.length;
+    }
+    if (typeof aviso.comentarios === "string" && aviso.comentarios.trim()) {
+      try {
+        const parsed = JSON.parse(aviso.comentarios);
+        if (Array.isArray(parsed)) return parsed.length;
+      } catch (_) {
+        const parsedLegacy = parseComentarios(aviso.comentarios);
+        if (Array.isArray(parsedLegacy) && parsedLegacy.length > 0) return parsedLegacy.length;
+      }
+    }
+    return 0;
+  };
+
+  // Contadores para os botões de segmentação ("Todos", "Atribuídos a mim", "Criados por mim")
+  const segmentCounts = useMemo(() => {
+    let assignedToMe = 0;
+    let createdByMe = 0;
+
+    visibleAvisos.forEach((item) => {
+      // Criados por mim: Number(aviso.id_autor) === Number(currentUser.id)
+      const isCreatedByMe =
+        (item.id_autor !== undefined && currentUser.id !== undefined && Number(item.id_autor) === Number(currentUser.id)) ||
+        (item.autorEmail && currentUser.email && item.autorEmail.toLowerCase().trim() === currentUser.email.toLowerCase().trim()) ||
+        (item.autor && currentAuthorName && item.autor.toLowerCase().trim() === currentAuthorName.toLowerCase().trim());
+      if (isCreatedByMe) createdByMe++;
+
+      // Atribuídos a mim: usuário presente em Tb_Destinacoes ou aviso Geral/Todos
+      const isAssignedToMe =
+        (Array.isArray(item.destinacoes) && item.destinacoes.some(d => currentUser.id !== undefined && Number(d.id_user) === Number(currentUser.id))) ||
+        (item.destino === "Todos" || !item.destino || item.destino.toLowerCase() === "todos" || item.destino.toLowerCase() === "geral") ||
+        (item.destino === "Individual" && (
+          (item.destinatarioEmail && currentUser.email && item.destinatarioEmail.toLowerCase().trim() === currentUser.email.toLowerCase().trim()) ||
+          (item.destinatarioId && currentUser.id && String(item.destinatarioId) === String(currentUser.id))
+        ));
+      if (isAssignedToMe) assignedToMe++;
+    });
+
+    return {
+      all: visibleAvisos.length,
+      assignedToMe,
+      createdByMe
+    };
+  }, [visibleAvisos, currentUser, currentAuthorName]);
+
   // Filter & Search Logic
   const filteredAvisos = useMemo(() => {
     return visibleAvisos.filter((item) => {
-      // 0. Status Tab (Pendentes, Lidas, Concluídas, Todas)
+      // 0. Segment Filter ("all" | "assigned_to_me" | "created_by_me")
+      if (activeSegmentTab === "created_by_me") {
+        const isCreatedByMe =
+          (item.id_autor !== undefined && currentUser.id !== undefined && Number(item.id_autor) === Number(currentUser.id)) ||
+          (item.autorEmail && currentUser.email && item.autorEmail.toLowerCase().trim() === currentUser.email.toLowerCase().trim()) ||
+          (item.autor && currentAuthorName && item.autor.toLowerCase().trim() === currentAuthorName.toLowerCase().trim());
+        if (!isCreatedByMe) return false;
+      } else if (activeSegmentTab === "assigned_to_me") {
+        const isAssignedToMe =
+          (Array.isArray(item.destinacoes) && item.destinacoes.some(d => currentUser.id !== undefined && Number(d.id_user) === Number(currentUser.id))) ||
+          (item.destino === "Todos" || !item.destino || item.destino.toLowerCase() === "todos" || item.destino.toLowerCase() === "geral") ||
+          (item.destino === "Individual" && (
+            (item.destinatarioEmail && currentUser.email && item.destinatarioEmail.toLowerCase().trim() === currentUser.email.toLowerCase().trim()) ||
+            (item.destinatarioId && currentUser.id && String(item.destinatarioId) === String(currentUser.id))
+          ));
+        if (!isAssignedToMe) return false;
+      }
+
+      // 1. Status Tab (Pendentes, Lidas, Concluídas, Todas)
       if (activeStatusTab !== "todas") {
         const userStage = getAvisoUserStage(item, currentUser);
         if (activeStatusTab === "pendentes" && userStage !== "pendente") return false;
@@ -1566,7 +2221,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
       return matchSearch && matchTipo && matchCriador && matchPrioridade && matchPeriodo;
     });
-  }, [visibleAvisos, activeStatusTab, search, filterTipo, filterCriador, filterPrioridade, currentUser, filterDataInicio, filterDataFim]);
+  }, [visibleAvisos, activeSegmentTab, activeStatusTab, search, filterTipo, filterCriador, filterPrioridade, currentUser, currentAuthorName, filterDataInicio, filterDataFim]);
 
   // Tab Badge counts por status (Pendentes, Lidas, Concluídas, Todas)
   const statusCounts = useMemo(() => {
@@ -1636,39 +2291,105 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
     return { total, criticas, particularidades, direcionadosAMim };
   }, [visibleAvisos, currentUser.email]);
 
-  // Reader list calculations for selected notice
+  // Reader list calculations for selected notice based on Tb_Destinacoes relacional
   const readersInfo = useMemo(() => {
     if (!selectedAviso) return { readUsers: [], missingUsers: [] };
 
-    if (selectedAviso.destino === "Individual") {
-      const isRead = hasUserReadNotice(selectedAviso, selectedAviso.destinatarioEmail);
-      const displayName = selectedAviso.destinatarioNome || selectedAviso.destinatarioEmail;
-      
-      return {
-        readUsers: isRead ? [{ email: selectedAviso.destinatarioEmail, nome: displayName }] : [],
-        missingUsers: !isRead ? [{ email: selectedAviso.destinatarioEmail, nome: displayName }] : []
-      };
+    const destinacoes = Array.isArray(selectedAviso.destinacoes) ? selectedAviso.destinacoes : [];
+
+    // 1. Já Visualizaram: Filtre os itens de aviso.destinacoes onde d.lido === true. Exiba d.user?.nome ou d.user?.email.
+    const destinacoesLidas = destinacoes.filter(d => Boolean(d.lido));
+
+    const readUserIds = new Set<string>();
+    const readUserEmails = new Set<string>();
+    const readUsers: { id?: string | number; email: string; nome: string }[] = [];
+
+    destinacoesLidas.forEach(d => {
+      const userObj = d.user;
+      const matchedGlobal = usersList.find(u => String(u.id) === String(d.id_user));
+
+      const idStr = d.id_user !== undefined && d.id_user !== null
+        ? String(d.id_user)
+        : (userObj?.id ? String(userObj.id) : (matchedGlobal?.id ? String(matchedGlobal.id) : ""));
+      if (idStr) readUserIds.add(idStr);
+
+      const emailStr = (userObj?.email || matchedGlobal?.email || "").toLowerCase().trim();
+      if (emailStr) readUserEmails.add(emailStr);
+
+      const displayName = userObj?.nome
+        ? `${userObj.nome} ${userObj.sobrenome || ""}`.trim()
+        : matchedGlobal?.nome
+        ? `${matchedGlobal.nome} ${matchedGlobal.sobrenome || ""}`.trim()
+        : (userObj?.email || matchedGlobal?.email || `Usuário #${d.id_user || "N/A"}`);
+
+      readUsers.push({
+        id: idStr || undefined,
+        email: emailStr || (idStr ? `user-${idStr}@sistema` : ""),
+        nome: displayName
+      });
+    });
+
+    // Retrocompatibilidade se houver dados em lido_por que não estão em destinacoes
+    if (Array.isArray(selectedAviso.lido_por)) {
+      selectedAviso.lido_por.forEach(rawId => {
+        const strId = String(rawId).trim();
+        if (strId && !readUserIds.has(strId)) {
+          const matched = usersList.find(u => String(u.id) === strId || u.email?.toLowerCase().trim() === strId.toLowerCase());
+          if (matched) {
+            readUserIds.add(String(matched.id));
+            if (matched.email) readUserEmails.add(matched.email.toLowerCase().trim());
+            readUsers.push({
+              id: matched.id,
+              email: matched.email,
+              nome: `${matched.nome} ${matched.sobrenome || ""}`.trim() || matched.email
+            });
+          }
+        }
+      });
     }
 
-    // Collective
-    const readUsers: { email: string; nome: string }[] = [];
-    const missingUsers: { email: string; nome: string }[] = [];
+    // 2. Falta Visualizar: Pegue a lista global de users do sistema e exiba aqueles cujo id NÃO esteja presente nas destinações lidas do aviso.
+    const missingUsers: { id?: string | number; email: string; nome: string }[] = [];
 
+    // Se for individual
+    if (selectedAviso.destino === "Individual") {
+      const destEmail = (selectedAviso.destinatarioEmail || "").toLowerCase().trim();
+      const destId = selectedAviso.destinatarioId ? String(selectedAviso.destinatarioId) : "";
+
+      const isAlreadyRead = (destId && readUserIds.has(destId)) || (destEmail && readUserEmails.has(destEmail));
+      if (!isAlreadyRead && (destEmail || destId)) {
+        const destName = selectedAviso.destinatarioNome || destEmail || `Destinatário #${destId}`;
+        missingUsers.push({
+          id: destId,
+          email: destEmail,
+          nome: destName
+        });
+      }
+      return { readUsers, missingUsers };
+    }
+
+    // Para Coletivo: pega todos os membros ativos da lista global de usuários
     activeMembersOnly.forEach(u => {
-      const matches = hasUserReadNotice(selectedAviso, u);
-      const desc = `${u.nome} ${u.sobrenome || ""}`.trim();
-      if (matches) {
-        readUsers.push({ email: u.email, nome: desc });
-      } else {
-        // Ignorar o próprio autor para não poluir
-        if (u.email.toLowerCase().trim() !== selectedAviso.autor.toLowerCase().trim()) {
-          missingUsers.push({ email: u.email, nome: desc });
+      const uId = String(u.id).trim();
+      const uEmail = (u.email || "").toLowerCase().trim();
+
+      const isRead = (uId && readUserIds.has(uId)) || (uEmail && readUserEmails.has(uEmail));
+
+      if (!isRead) {
+        // Ignorar o próprio autor do aviso se for o caso
+        const authorEmail = (selectedAviso.autorEmail || selectedAviso.autor || "").toLowerCase().trim();
+        if (uEmail !== authorEmail) {
+          missingUsers.push({
+            id: u.id,
+            email: u.email,
+            nome: `${u.nome} ${u.sobrenome || ""}`.trim() || u.email
+          });
         }
       }
     });
 
     return { readUsers, missingUsers };
-  }, [selectedAviso, activeMembersOnly]);
+  }, [selectedAviso, activeMembersOnly, usersList]);
 
   // Task completion calculations for selected task
   const taskCompletionInfo = useMemo(() => {
@@ -1979,6 +2700,64 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
         </div>
       </div>
 
+      {/* NOVOS FILTROS DE VISUALIZAÇÃO ("Atribuídos a mim", "Criados por mim" e "Todos") */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1">
+        <div className="inline-flex items-center gap-1.5 p-1 bg-gray-100/90 rounded-xl border border-gray-200/70 shadow-xs">
+          <button
+            type="button"
+            onClick={() => setActiveSegmentTab("all")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-sans transition cursor-pointer flex items-center gap-1.5 ${
+              activeSegmentTab === "all"
+                ? "bg-white text-slate-900 shadow-xs font-bold"
+                : "text-gray-500 hover:text-gray-900 font-medium"
+            }`}
+          >
+            <span>Todos os Avisos</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
+              activeSegmentTab === "all" ? "bg-slate-100 text-slate-800 font-bold" : "bg-gray-200/70 text-gray-500"
+            }`}>
+              {segmentCounts.all}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSegmentTab("assigned_to_me")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-sans transition cursor-pointer flex items-center gap-1.5 ${
+              activeSegmentTab === "assigned_to_me"
+                ? "bg-white text-[#FF5022] shadow-xs font-bold"
+                : "text-gray-500 hover:text-gray-900 font-medium"
+            }`}
+          >
+            <UserCheck className="w-3.5 h-3.5 text-[#FF5022]" />
+            <span>Atribuídos a mim</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
+              activeSegmentTab === "assigned_to_me" ? "bg-orange-50 text-[#FF5022] font-bold" : "bg-gray-200/70 text-gray-500"
+            }`}>
+              {segmentCounts.assignedToMe}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSegmentTab("created_by_me")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-sans transition cursor-pointer flex items-center gap-1.5 ${
+              activeSegmentTab === "created_by_me"
+                ? "bg-white text-slate-900 shadow-xs font-bold"
+                : "text-gray-500 hover:text-gray-900 font-medium"
+            }`}
+          >
+            <User className="w-3.5 h-3.5 text-slate-600" />
+            <span>Criados por mim</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
+              activeSegmentTab === "created_by_me" ? "bg-slate-100 text-slate-800 font-bold" : "bg-gray-200/70 text-gray-500"
+            }`}>
+              {segmentCounts.createdByMe}
+            </span>
+          </button>
+        </div>
+      </div>
+
       {/* FILTROS E BARRA DE BUSCA DIRETOS SOBRE O FUNDO */}
       <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3">
         {/* Search */}
@@ -2087,6 +2866,14 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                     {/* Header: badges padronizadas */}
                     <div className="flex items-center justify-between gap-2 pb-1">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        {/* Tag com ID do Aviso (ex: #AV-2004 ou #2004) */}
+                        <span 
+                          className="font-mono text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200/80 shrink-0" 
+                          title={`Identificador do Aviso: ${item.id}`}
+                        >
+                          {formatNoticeId(item.id)}
+                        </span>
+
                         <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
                           {cleanTaskLabel(item.tipo)}
                         </span>
@@ -2123,7 +2910,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                         <span className="truncate">{item.titulo}</span>
                       </h4>
                       <p className="text-xs text-gray-600 leading-relaxed font-sans line-clamp-2">
-                        {item.conteudo}
+                        {sanitizarDescricaoAviso(item.conteudo)}
                       </p>
                     </div>
                   </div>
@@ -2133,11 +2920,39 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
                   {/* Foot details */}
                   <div className="mt-4 pt-3 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-gray-500 font-sans font-medium">
-                    <div className="flex items-center gap-1.5 truncate">
-                      <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center text-[10px] text-gray-700 font-bold uppercase select-none">
-                        {getAuthorDisplayName(item)[0] || "A"}
+                    <div className="flex items-center gap-3 truncate">
+                      <div className="flex items-center gap-1.5 truncate">
+                        <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center text-[10px] text-gray-700 font-bold uppercase select-none">
+                          {getAuthorDisplayName(item)[0] || "A"}
+                        </div>
+                        <span className="truncate">Por: <strong className="text-gray-700 font-semibold">{getAuthorDisplayName(item)}</strong></span>
                       </div>
-                      <span className="truncate">Por: <strong className="text-gray-700 font-semibold">{getAuthorDisplayName(item)}</strong></span>
+
+                      {/* Contadores Reativos com Ícones (Visualizações e Comentários) */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200/80 transition-colors"
+                          title={`${getNoticeReadCount(item)} pessoa(s) já visualizaram este aviso`}
+                        >
+                          <Eye className="w-3.5 h-3.5 text-slate-400" />
+                          <span className="font-mono text-[11px] font-bold text-slate-700">{getNoticeReadCount(item)}</span>
+                        </span>
+
+                        {(() => {
+                          const totalComentarios = Array.isArray(item.comentarios) 
+                            ? item.comentarios.length 
+                            : ((item as any).Tb_Comentarios?.length || getNoticeCommentsCount(item));
+                          return (
+                            <div
+                              className="flex items-center gap-1 text-slate-500 text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200/80"
+                              title={`${totalComentarios} comentário(s) registrado(s)`}
+                            >
+                              <MessageSquare size={13} className="text-slate-500 shrink-0" />
+                              <span className="font-mono text-[11px] font-bold text-slate-700">{totalComentarios}</span>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-1.5 shrink-0">
@@ -2245,9 +3060,14 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                         className="bg-white border border-gray-100 hover:border-gray-200 rounded-lg p-4 shadow-sm hover:shadow transition cursor-pointer space-y-3 relative overflow-visible"
                       >
                         <div className="flex items-center justify-between gap-1 text-xs">
-                          <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
-                            {cleanTaskLabel(item.tipo)}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono text-[10px] font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200/80 shrink-0">
+                              {formatNoticeId(item.id)}
+                            </span>
+                            <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
+                              {cleanTaskLabel(item.tipo)}
+                            </span>
+                          </div>
                           <span className={`text-xs font-medium px-2 py-0.5 rounded ${decor.badge}`}>
                             {item.prioridade}
                           </span>
@@ -2255,14 +3075,36 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
                         <div className="space-y-1">
                           <h5 className="text-xs font-semibold text-slate-900 leading-snug line-clamp-2 hover:text-[#FF5022] transition">{item.titulo}</h5>
-                          <p className="text-xs text-gray-600 leading-normal line-clamp-2">{item.conteudo}</p>
+                          <p className="text-xs text-gray-600 leading-normal line-clamp-2">{sanitizarDescricaoAviso(item.conteudo)}</p>
                         </div>
 
                         {renderProgressTracker(item)}
 
                         <div className="pt-2 border-t border-gray-100 flex justify-between items-center text-xs text-gray-500 font-medium">
                           <span className="truncate">De: <strong className="text-gray-700 font-semibold">{getAuthorDisplayName(item).split(" ")[0]}</strong></span>
-                          <span className="px-2 py-0.5 bg-gray-100 rounded text-gray-700 font-medium shrink-0">{item.destino === "Todos" ? "# Coletivo" : "🔒 Individual"}</span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200/70 text-[10px]"
+                              title={`${getNoticeReadCount(item)} leitura(s)`}
+                            >
+                              <Eye className="w-3 h-3 text-slate-400" />
+                              <span className="font-mono font-bold text-slate-700">{getNoticeReadCount(item)}</span>
+                            </span>
+                            {(() => {
+                              const totalComentarios = Array.isArray(item.comentarios) 
+                                ? item.comentarios.length 
+                                : ((item as any).Tb_Comentarios?.length || getNoticeCommentsCount(item));
+                              return (
+                                <div
+                                  className="flex items-center gap-1 text-slate-500 text-[10px] bg-slate-100 px-1.5 py-0.5 rounded-full border border-slate-200/70"
+                                  title={`${totalComentarios} comentário(s)`}
+                                >
+                                  <MessageSquare size={12} className="text-slate-500 shrink-0" />
+                                  <span className="font-mono font-bold text-slate-700">{totalComentarios}</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
                         </div>
 
                         {/* Dropdown Menu de Ações para Avisos */}
@@ -2318,9 +3160,14 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                         className="bg-white border border-gray-100 hover:border-gray-200 rounded-lg p-4 shadow-sm hover:shadow transition cursor-pointer space-y-3 relative overflow-visible"
                       >
                         <div className="flex items-center justify-between gap-1 text-xs">
-                          <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
-                            {cleanTaskLabel(item.tipo)}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono text-[10px] font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200/80 shrink-0">
+                              {formatNoticeId(item.id)}
+                            </span>
+                            <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
+                              {cleanTaskLabel(item.tipo)}
+                            </span>
+                          </div>
                           <span className={`text-xs font-medium px-2 py-0.5 rounded ${decor.badge}`}>
                             {item.prioridade}
                           </span>
@@ -2328,16 +3175,36 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
                         <div className="space-y-1">
                           <h5 className="text-xs font-semibold text-slate-900 leading-snug line-clamp-2 hover:text-[#FF5022] transition">{item.titulo}</h5>
-                          <p className="text-xs text-gray-600 leading-normal line-clamp-2">{item.conteudo}</p>
+                          <p className="text-xs text-gray-600 leading-normal line-clamp-2">{sanitizarDescricaoAviso(item.conteudo)}</p>
                         </div>
 
                         {renderProgressTracker(item)}
 
                         <div className="pt-2 border-t border-gray-100 flex justify-between items-center text-xs text-gray-500 font-medium">
                           <span className="truncate">Para: <strong className="text-gray-700 font-semibold">{cleanOperatorLabel(item.destinatarioNome).split(" ")[0]}</strong></span>
-                          <span className="text-blue-700 bg-blue-50 px-2 py-0.5 border border-blue-200/60 rounded text-xs font-medium flex items-center gap-0.5 select-none shrink-0">
-                            👁️ Em Andamento
-                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200/70 text-[10px]"
+                              title={`${getNoticeReadCount(item)} leitura(s)`}
+                            >
+                              <Eye className="w-3 h-3 text-slate-400" />
+                              <span className="font-mono font-bold text-slate-700">{getNoticeReadCount(item)}</span>
+                            </span>
+                            {(() => {
+                              const totalComentarios = Array.isArray(item.comentarios) 
+                                ? item.comentarios.length 
+                                : ((item as any).Tb_Comentarios?.length || getNoticeCommentsCount(item));
+                              return (
+                                <div
+                                  className="flex items-center gap-1 text-slate-500 text-[10px] bg-slate-100 px-1.5 py-0.5 rounded-full border border-slate-200/70"
+                                  title={`${totalComentarios} comentário(s)`}
+                                >
+                                  <MessageSquare size={12} className="text-slate-500 shrink-0" />
+                                  <span className="font-mono font-bold text-slate-700">{totalComentarios}</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
                         </div>
 
                         {/* Dropdown Menu de Ações para Avisos */}
@@ -2408,9 +3275,14 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                         className="bg-white border border-gray-100 hover:border-gray-200 rounded-lg p-4 shadow-xs hover:shadow transition cursor-pointer space-y-3 relative overflow-visible opacity-90 hover:opacity-100"
                       >
                         <div className="flex items-center justify-between gap-1 text-xs">
-                          <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
-                            {cleanTaskLabel(item.tipo)}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono text-[10px] font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200/80 shrink-0">
+                              {formatNoticeId(item.id)}
+                            </span>
+                            <span className="bg-gray-100 text-gray-700 text-xs font-medium px-2 py-0.5 rounded">
+                              {cleanTaskLabel(item.tipo)}
+                            </span>
+                          </div>
                           <span className={`text-xs font-medium px-2 py-0.5 rounded ${decor.badge}`}>
                             {item.prioridade}
                           </span>
@@ -2418,14 +3290,37 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
                         <div className="space-y-1">
                           <h5 className="text-xs font-semibold text-slate-800 line-through decoration-slate-400 leading-snug line-clamp-2">{item.titulo}</h5>
-                          <p className="text-xs text-gray-400 leading-normal line-clamp-2">{item.conteudo}</p>
+                          <p className="text-xs text-gray-400 leading-normal line-clamp-2">{sanitizarDescricaoAviso(item.conteudo)}</p>
                         </div>
 
                         {renderProgressTracker(item)}
 
                         <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500 font-medium">
-                          <span>Para: <strong className="text-gray-700 font-semibold">{cleanOperatorLabel(item.destinatarioNome).split(" ")[0]}</strong></span>
-                          <span className="text-emerald-700 font-bold uppercase flex items-center gap-0.5">✓ Finalizado</span>
+                          <span className="truncate">Para: <strong className="text-gray-700 font-semibold">{cleanOperatorLabel(item.destinatarioNome).split(" ")[0]}</strong></span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200/70 text-[10px]"
+                              title={`${getNoticeReadCount(item)} leitura(s)`}
+                            >
+                              <Eye className="w-3 h-3 text-slate-400" />
+                              <span className="font-mono font-bold text-slate-700">{getNoticeReadCount(item)}</span>
+                            </span>
+                            {(() => {
+                              const totalComentarios = Array.isArray(item.comentarios) 
+                                ? item.comentarios.length 
+                                : ((item as any).Tb_Comentarios?.length || getNoticeCommentsCount(item));
+                              return (
+                                <div
+                                  className="flex items-center gap-1 text-slate-500 text-[10px] bg-slate-100 px-1.5 py-0.5 rounded-full border border-slate-200/70"
+                                  title={`${totalComentarios} comentário(s)`}
+                                >
+                                  <MessageSquare size={12} className="text-slate-500 shrink-0" />
+                                  <span className="font-mono font-bold text-slate-700">{totalComentarios}</span>
+                                </div>
+                              );
+                            })()}
+                            <span className="text-emerald-700 font-bold uppercase flex items-center gap-0.5 ml-1">✓ Finalizado</span>
+                          </div>
                         </div>
 
                         {/* Dropdown Menu de Ações para Avisos */}
@@ -2737,6 +3632,9 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                 "bg-orange-50/20"
               }`}>
                 <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200/80 shrink-0">
+                    {formatNoticeId(selectedAviso.id)}
+                  </span>
                   <span className={`text-xs font-medium px-2 py-0.5 rounded ${
                     selectedAviso.tipo === "Particularidade"
                       ? "bg-amber-100 text-amber-800"
@@ -2779,7 +3677,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                     <span>|</span>
                     <span className="flex items-center gap-1">
                       <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                      Criado em: <strong className="text-slate-650">{formatarDataBR(selectedAviso.dataCriacao)}</strong>
+                      Criado em: <strong className="text-slate-650">{formatarCriadoEm(selectedAviso)}</strong>
                     </span>
                     {isIndividual && (
                       <>
@@ -2792,9 +3690,9 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                   </div>
                 </div>
 
-                {/* TEXT CONTENT */}
-                <div className="bg-slate-50 text-slate-705 p-5 rounded-xl border border-slate-200 leading-relaxed text-xs font-medium font-sans whitespace-pre-wrap max-h-48 overflow-y-auto">
-                  {selectedAviso.conteudo}
+                {/* TEXT CONTENT COM LIMPEZA VISUAL E DESTAQUE DE FINALIZAÇÃO */}
+                <div className="bg-slate-50 text-slate-705 p-5 rounded-xl border border-slate-200 text-xs font-medium font-sans max-h-56 overflow-y-auto">
+                  {renderConteudoComDestaque(selectedAviso.conteudo)}
                 </div>
 
                 {/* STEPPER PROGRESS TRACKER (Only for individual pendencies) */}
@@ -2891,31 +3789,138 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                 {/* SEÇÃO DE COMENTÁRIOS (THREAD) */}
                 <div className="space-y-3 pt-2">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
-                    <h5 className="text-[11px] font-bold uppercase tracking-wider text-slate-600 font-sans flex items-center gap-1.5">
+                    <h3 className="text-xs font-semibold text-slate-600 tracking-wider flex items-center gap-1.5">
                       <MessageSquare className="w-3.5 h-3.5 text-[#FF5022]" />
-                      <span>Comentários ({parseComentarios(selectedAviso.comentarios).length})</span>
-                    </h5>
+                      <span>COMENTÁRIOS ({comentariosModal?.length || 0})</span>
+                    </h3>
                     <span className="text-[10px] text-slate-400">Histórico de observações</span>
                   </div>
 
                   {/* Histórico de Comentários */}
                   <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
-                    {parseComentarios(selectedAviso.comentarios).length === 0 ? (
+                    {comentariosModal.length === 0 ? (
                       <div className="text-center py-4 bg-slate-50/70 border border-dashed border-slate-200 rounded-lg text-slate-400 text-xs italic">
                         Nenhum comentário registrado ainda.
                       </div>
                     ) : (
-                      parseComentarios(selectedAviso.comentarios).map((comentario, idx) => (
-                        <div key={idx} className="bg-gray-50 p-3 rounded-md border border-gray-200/70 text-xs shadow-2xs">
-                          <div className="flex items-center justify-between mb-1">
-                            <strong className="text-slate-800 font-semibold">{comentario.autor || "Operador"}</strong>
-                            <span className="text-[10px] text-gray-500 font-mono">
-                              {formatarDataHoraBR(comentario.data)}
-                            </span>
+                      comentariosModal.map((comentario, idx) => {
+                        const isAuthor = Boolean(
+                          isAdmin ||
+                          (currentUser?.id != null && (
+                            (comentario.id_user != null && Number(comentario.id_user) === Number(currentUser.id)) ||
+                            (comentario.id_autor != null && Number(comentario.id_autor) === Number(currentUser.id))
+                          ))
+                        );
+                        const isEditingThis = editingCommentId === (comentario.id_comentario || comentario.id || idx);
+                        const isFinalizacao = Boolean(
+                          comentario.texto?.includes('[Finalização]') || 
+                          comentario.is_finalizacao || 
+                          comentario.tipo_acao === 'Finalização'
+                        );
+                        const isFechamento = Boolean(
+                          comentario.texto?.includes('[Fechamento]') || 
+                          comentario.tipo_acao === 'Fechamento'
+                        );
+
+                        const textoLimpo = comentario.texto
+                          ? comentario.texto.replace(/\[Finalização\]/gi, '').replace(/\[Fechamento\]/gi, '').trim()
+                          : '';
+
+                        return (
+                          <div
+                            key={comentario.id_comentario || comentario.id || idx}
+                            className={cn(
+                              "p-3 rounded-lg border transition-all text-xs group relative shadow-2xs",
+                              isFinalizacao
+                                ? "bg-emerald-50/60 border-emerald-200"
+                                : isFechamento
+                                ? "bg-slate-100/70 border-slate-300/80"
+                                : "bg-slate-50/50 border-slate-200"
+                            )}
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-xs text-slate-800">
+                                  {comentario.autor || "Operador"}
+                                </span>
+                                {isFinalizacao && (
+                                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-medium px-2 py-0.5 rounded-full inline-flex items-center">
+                                    Finalização
+                                  </span>
+                                )}
+                                {isFechamento && (
+                                  <span className="text-[10px] bg-slate-200 text-slate-800 font-medium px-2 py-0.5 rounded-full inline-flex items-center">
+                                    Fechamento
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-slate-400 font-mono">
+                                  {formatarDataHoraBR(comentario.created_at || comentario.data)}
+                                </span>
+                                {isAuthor && !isEditingThis && (
+                                  <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition-opacity">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCommentId(comentario.id_comentario || comentario.id || idx);
+                                        setEditingCommentText(comentario.texto);
+                                      }}
+                                      title="Editar comentário"
+                                      className="p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-blue-600 transition cursor-pointer"
+                                    >
+                                      <Pencil className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteComment(comentario, idx)}
+                                      title="Excluir comentário"
+                                      className="p-1 hover:bg-rose-100 rounded text-slate-500 hover:text-rose-600 transition cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {isEditingThis ? (
+                              <div className="space-y-2 mt-2">
+                                <textarea
+                                  value={editingCommentText}
+                                  onChange={(e) => setEditingCommentText(e.target.value)}
+                                  rows={2}
+                                  className="w-full text-xs p-2 border border-blue-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white resize-none"
+                                />
+                                <div className="flex justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingCommentId(null);
+                                      setEditingCommentText("");
+                                    }}
+                                    className="px-2.5 py-1 text-[11px] rounded border border-slate-300 hover:bg-slate-100 text-slate-600 cursor-pointer"
+                                  >
+                                    Cancelar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={!editingCommentText.trim() || isSubmittingComment}
+                                    onClick={() => handleSaveEditComment(comentario, idx)}
+                                    className="px-2.5 py-1 text-[11px] rounded bg-blue-600 hover:bg-blue-700 text-white font-semibold cursor-pointer disabled:opacity-50"
+                                  >
+                                    Salvar
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">
+                                {textoLimpo}
+                              </p>
+                            )}
                           </div>
-                          <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{comentario.texto}</p>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
@@ -3099,10 +4104,10 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
               </div>
 
               {/* Footer holding action triggers */}
-              <div className="bg-slate-50 border-t border-slate-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+              <div className="bg-slate-50 border-t border-slate-200 p-3.5 flex flex-wrap items-center justify-between gap-2.5">
                 
-                {/* ACTION CONTEXT INTERACTION: Dropdown de Ações Unificado */}
-                <div className="flex items-center">
+                {/* Left: Dropdown de Ações Unificado e Botão Copiar WhatsApp */}
+                <div className="flex flex-wrap items-center gap-2">
                   <ModalAcoesDropdown
                     item={selectedAviso}
                     userStage={getAvisoUserStage(selectedAviso, currentUser)}
@@ -3113,11 +4118,31 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                     canClosePendency={canClosePendency}
                     onClosePendency={handleClosePendency}
                   />
+
+                  {/* Botão Slim de Copiar p/ WhatsApp */}
+                  <button
+                    type="button"
+                    onClick={() => handleCopyWhatsApp(selectedAviso)}
+                    className="h-8 px-3 text-xs font-medium rounded-md border transition-all duration-150 flex items-center gap-1.5 cursor-pointer shadow-sm bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                    title="Copiar texto formatado para WhatsApp"
+                  >
+                    {copiedWhatsApp ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="font-semibold text-emerald-700">Copiado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Share2 className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Copiar p/ WhatsApp</span>
+                      </>
+                    )}
+                  </button>
                 </div>
 
-                {/* FOOTER ACTIONS EDIT/DELETE */}
+                {/* Right: FOOTER ACTIONS EDIT/DELETE */}
                 <div className="flex items-center gap-2 ml-auto">
-                  {customizable ? (
+                  {customizable && (
                     <>
                       <button
                         type="button"
@@ -3125,10 +4150,10 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                           setShowDetailModal(false);
                           openEdit(selectedAviso);
                         }}
-                        className="flex items-center gap-1 px-3 py-1.5 hover:bg-orange-50 border border-slate-200 hover:border-orange-200 rounded-lg text-xs font-bold text-slate-600 hover:text-[#FF5022] transition cursor-pointer"
+                        className="h-8 px-3 text-xs font-medium rounded-md border transition-all duration-150 flex items-center gap-1.5 cursor-pointer shadow-sm bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-blue-600"
                       >
                         <Edit className="w-3.5 h-3.5" />
-                        Editar
+                        <span>Editar</span>
                       </button>
 
                       <button
@@ -3136,17 +4161,12 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                         onClick={() => {
                           setDeleteConfirmId(selectedAviso.id);
                         }}
-                        className="flex items-center gap-1 px-3 py-1.5 hover:bg-rose-50 border border-slate-205 hover:border-rose-220 rounded-lg text-[11px] font-bold text-slate-600 hover:text-rose-650 transition cursor-pointer"
+                        className="h-8 px-3 text-xs font-medium rounded-md border transition-all duration-150 flex items-center gap-1.5 cursor-pointer shadow-sm bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100 hover:text-rose-800"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        Excluir
+                        <span>Excluir</span>
                       </button>
                     </>
-                  ) : (
-                    <span className="text-[10px] text-slate-400 bg-slate-100 px-2 py-1 rounded font-medium flex items-center gap-1 select-none">
-                      <Lock className="w-3 h-3 text-slate-400" />
-                      Somente Leitura
-                    </span>
                   )}
                 </div>
               </div>
@@ -3177,9 +4197,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
               </button>
               <button
                 onClick={() => {
-                  onDelete(deleteConfirmId);
-                  setDeleteConfirmId(null);
-                  setShowDetailModal(false);
+                  handleDelete(deleteConfirmId);
                 }}
                 className="flex-1 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer"
               >
@@ -3497,12 +4515,12 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
 
       {/* FINALIZE/CLOSE WITH COMMENT MODAL */}
       {showFinalizeCommentModal && pendingFinalizeAviso && (
-        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 z-[100] animate-fade-in" id="finalize-comment-modal">
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 z-[60] animate-fade-in" id="finalize-comment-modal">
           <div className="bg-white border border-slate-200 rounded-3xl shadow-xl w-full max-w-lg overflow-hidden animate-zoom-in">
             <div className="px-6 py-4.5 border-b border-slate-100 flex items-center justify-between bg-emerald-50/10">
               <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-1.5 font-sans">
                 <CheckCircle className="w-5 h-5 text-emerald-600" />
-                {finalizeActionType === "resolve" ? "Finalizar Particularidade" : "Fechar Pendência (Concluir Fluxo)"}
+                Finalizar {pendingFinalizeAviso.tipo || "Item"}
               </h3>
               <button
                 onClick={() => {
@@ -3520,7 +4538,7 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
               <div>
                 <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider font-mono">Item Selecionado:</span>
                 <p className="text-sm font-bold text-slate-800 mt-1">{pendingFinalizeAviso.titulo}</p>
-                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{pendingFinalizeAviso.conteudo}</p>
+                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{pendingFinalizeAviso.conteudo ? sanitizarDescricaoAviso(pendingFinalizeAviso.conteudo).replace(/\*\*/g, "") : ""}</p>
               </div>
 
               <div className="space-y-1.5">
@@ -3530,7 +4548,15 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                 <textarea
                   value={finalizeComment}
                   onChange={(e) => setFinalizeComment(e.target.value)}
-                  placeholder="Ex: Particularidade devidamente sanada. Fibra normalizada e verificado tráfego estabilizado."
+                  placeholder={
+                    (pendingFinalizeAviso.tipo || "").toLowerCase().includes("tarefa")
+                      ? "Ex: Tarefa concluída conforme solicitado."
+                      : (pendingFinalizeAviso.tipo || "").toLowerCase().includes("particularidade")
+                      ? "Ex: Particularidade devidamente sanada."
+                      : (pendingFinalizeAviso.tipo || "").toLowerCase().includes("aviso")
+                      ? "Ex: Ciente do aviso."
+                      : "Ex: Concluído conforme solicitado."
+                  }
                   className="w-full min-h-[100px] text-xs p-3 bg-slate-50 border border-slate-200 focus:border-[#FF5022] focus:ring-1 focus:ring-[#FF5022]/20 rounded-xl transition font-sans placeholder-slate-400 outline-none resize-none"
                 />
               </div>
@@ -3556,6 +4582,10 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
                   } else if (finalizeActionType === "close") {
                     executeClosePendency(pendingFinalizeAviso, finalizeComment);
                   }
+                  setActionToast({
+                    message: `${pendingFinalizeAviso.tipo || "Item"} finalizado com sucesso!`,
+                    type: "success"
+                  });
                   setShowFinalizeCommentModal(false);
                   setPendingFinalizeAviso(null);
                   setFinalizeComment("");
@@ -3914,6 +4944,27 @@ export const PainelAvisos: React.FC<PainelAvisosProps> = ({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Toast Flutuante Local com z-[70] */}
+      {actionToast && (
+        <div
+          id="painel-avisos-toast-success"
+          className="fixed bottom-6 right-6 z-[70] max-w-md py-2.5 px-4 bg-emerald-600 text-white rounded-xl shadow-2xl flex items-center justify-between gap-3 text-xs font-bold font-sans animate-fade-in"
+        >
+          <div className="flex items-center gap-2">
+            <CheckCircle className="w-4 h-4 text-emerald-100 shrink-0" />
+            <span>{actionToast.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionToast(null)}
+            className="text-emerald-200 hover:text-white transition font-bold text-xs p-1 cursor-pointer"
+            title="Fechar"
+          >
+            ✕
+          </button>
         </div>
       )}
     </div>

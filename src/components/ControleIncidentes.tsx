@@ -37,7 +37,8 @@ import {
   CloudOff,
   HelpCircle,
   Minus,
-  Layers
+  Layers,
+  Wrench
 } from "lucide-react";
 import { checkIncidentDateError } from "../utils/incidentValidation";
 
@@ -423,8 +424,8 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
   };
 
   // Função para simular o estilo de formatação do WhatsApp no texto do relatório
-  const renderWhatsAppText = (text: string) => {
-    if (!text) return null;
+  const renderWhatsAppText = (text: any) => {
+    if (!text || typeof text !== "string") return null;
     
     const lines = text.split("\n");
     
@@ -608,7 +609,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
   // Classificação intrínseca da natureza do chamado (independente de estar concluído/resolvido)
   // Usada para os subfiltros de categoria na guia "Todos" (pendentes ou não)
-  const getNatureType = (item: any): "rompimento" | "atenuacao_critica" | "atenuado" | "temperatura" | "indisponibilidade" | "outros" => {
+  const getNatureType = (item: any): "rompimento" | "dwdm_om" | "atenuacao_critica" | "atenuado" | "temperatura" | "indisponibilidade" | "outros" => {
     const rawCat = String(getVal(item, "Categoria") || "").trim();
     const catNorm = normStr(rawCat);
     const rawTitle = String(getVal(item, "Título") || getVal(item, "Titulo") || "").trim();
@@ -620,41 +621,46 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const stat = normStr(getVal(item, "Status") || "");
     const isAtenuado = stat === "atenuado";
 
-    // Regra A: Qualquer chamado com a categoria estrita "IMOC - Rompimento DWDM Canal" deve ser exibido exclusivamente no subfiltro "Outros"
-    const isImocRompimentoCanal = catNorm === "imoc - rompimento dwdm canal" || catNorm.startsWith("imoc - rompimento dwdm canal");
-    if (isImocRompimentoCanal) {
-      return "outros";
-    }
-
-    // Regra B: O subfiltro "Temperatura / Infra" deve aceitar apenas as categorias:
-    // 1. "Operações de Infraestrutura - Alerta de Temperatura"
-    // 2. "IMOC - Acompanhamento de acesso ao DC"
-    const isTemperaturaInfra = 
-      catNorm === "operacoes de infraestrutura - alerta de temperatura" || 
-      catNorm === "imoc - acompanhamento de acesso ao dc";
-
-    // 1. Atenuação Crítica (por natureza/tag)
+    // 1. Atenuação Crítica (mantém lógica original)
     if (isAtenuacaocritica) {
       return "atenuacao_critica";
     }
 
-    // 2. Status Atenuado
+    // 2. Status Atenuado (mantém lógica original)
     if (isAtenuado) {
       return "atenuado";
     }
 
-    // 3. Temperatura / Infra (estrita às 2 categorias da Regra B)
+    // 3. Guia "DWDM O&M" (Nova Guia):
+    // Inclui todos os chamados que contenham "DWDM O&M -" (ex: DWDM O&M - Acompanhamento de Equipe)
+    const isDwdmOm = rawCat.includes("DWDM O&M -") || catNorm.includes("dwdm o&m -") || rawCat.includes("DWDM O&M") || catNorm.includes("dwdm o&m");
+    if (isDwdmOm) {
+      return "dwdm_om";
+    }
+
+    // 4. Guia "Rompimentos":
+    // Inclui estritamente os chamados marcados como "DWDM - ROMPIMENTO" (ou comece com ele)
+    // Regra de Exclusão: Nenhum chamado do tipo "DWDM O&M -" deve aparecer nesta guia
+    const isRompimentoEstrito = 
+      !isDwdmOm && 
+      (rawCat.includes("DWDM - ROMPIMENTO") || catNorm.includes("dwdm - rompimento") || catNorm === "dwdm - rompimento" || catNorm.startsWith("dwdm - rompimento"));
+    if (isRompimentoEstrito) {
+      return "rompimento";
+    }
+
+    // 5. Guia "Temperatura / Infra":
+    // Captura todos os chamados cujo tipo/categoria comece com ou contenha "Operações de Infraestrutura -"
+    // (ex: Operações de Infraestrutura - Outros, Operações de Infraestrutura - Alerta de Temperatura)
+    const isTemperaturaInfra = 
+      rawCat.includes("Operações de Infraestrutura -") || 
+      catNorm.includes("operacoes de infraestrutura -") ||
+      catNorm === "operacoes de infraestrutura - alerta de temperatura" ||
+      catNorm === "imoc - acompanhamento de acesso ao dc";
     if (isTemperaturaInfra) {
       return "temperatura";
     }
 
-    // 4. Rompimentos (demais rompimentos)
-    const isRompimento = catNorm.includes("rompimento") || titNorm.includes("rompimento");
-    if (isRompimento) {
-      return "rompimento";
-    }
-
-    // 5. Indisponibilidade
+    // 6. Indisponibilidade (mantém lógica original)
     const isIndisponibilidade = catNorm.includes("indisponibilidade") || titNorm.includes("indisponibilidade");
     if (isIndisponibilidade) {
       return "indisponibilidade";
@@ -663,17 +669,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     return "outros";
   };
 
-  // Função centralizada para classificação dos incidentes pendentes/resolvidos seguindo as regras de negócio:
-  // Regra A: "IMOC - Rompimento DWDM Canal" -> estritamente "Outros" (⚪)
-  // Regra B: "Temperatura / Infra" -> aceita APENAS "Operações de Infraestrutura - Alerta de Temperatura" e "IMOC - Acompanhamento de acesso ao DC" (🌡️)
-  // 1. Rompimento com Data Fim no período e não atenuado -> Resolvido (🟢)
-  // 2. Atenuação Crítica Finalizada -> Resolvido (🟢)
-  // 3. Status = "atenuado" -> Atenuado (🟡)
-  // 4. Atenuação Crítica = "Sim" -> Atenuação Crítica (🟠)
-  // 5. Temperatura / Infraestrutura -> Temperatura (🌡️)
-  // 6. Rompimento -> Rompimento (🔴)
-  // 7. Indisponibilidade -> Indisponibilidade (🔵)
-  // 8. Outros -> Outros (⚪)
+  // Função centralizada para classificação dos incidentes pendentes/resolvidos seguindo as regras de negócio
   const getClassification = (item: any) => {
     const rawCat = String(getVal(item, "Categoria") || "").trim();
     const catNorm = normStr(rawCat);
@@ -686,18 +682,28 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const stat = normStr(getVal(item, "Status") || "");
     const isAtenuado = stat === "atenuado";
 
-    // Regra A: Qualquer chamado com a categoria estrita "IMOC - Rompimento DWDM Canal" deve ser exibido exclusivamente no subfiltro "Outros"
-    const isImocRompimentoCanal = catNorm === "imoc - rompimento dwdm canal" || catNorm.startsWith("imoc - rompimento dwdm canal");
-    if (isImocRompimentoCanal) {
-      return { type: "outros", emoji: "⚪" };
+    // 1. Atenuação Crítica (mantém original)
+    if (isAtenuacaocritica) {
+      if (checkIfConcluido(item)) {
+        return { type: "resolvido", emoji: "🟢" };
+      }
+      return { type: "atenuacao_critica", emoji: "🟠" };
     }
 
-    // Regra B: O subfiltro "Temperatura / Infra" deve aceitar apenas as categorias:
-    // 1. "Operações de Infraestrutura - Alerta de Temperatura"
-    // 2. "IMOC - Acompanhamento de acesso ao DC"
-    const isTemperaturaInfra = 
-      catNorm === "operacoes de infraestrutura - alerta de temperatura" || 
-      catNorm === "imoc - acompanhamento de acesso ao dc";
+    // 2. Status Atenuado (mantém original)
+    if (isAtenuado) {
+      return { type: "atenuado", emoji: "🟡" };
+    }
+
+    // 3. Guia "DWDM O&M" (Nova Guia):
+    // Inclui chamados que contenham "DWDM O&M -"
+    const isDwdmOm = rawCat.includes("DWDM O&M -") || catNorm.includes("dwdm o&m -") || rawCat.includes("DWDM O&M") || catNorm.includes("dwdm o&m");
+    if (isDwdmOm) {
+      if (checkIfConcluido(item)) {
+        return { type: "resolvido", emoji: "🟢" };
+      }
+      return { type: "dwdm_om", emoji: "🔧" };
+    }
 
     const dataFimStr = getVal(item, "Data Fim") || "";
     const parsedFimDate = parseIncidentDate(dataFimStr);
@@ -717,20 +723,25 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
     const hasDataFimInPeriod = parsedFimDate !== null && (!startDate && !endDate ? true : isDateInPeriod(parsedFimDate));
 
-    // 1. Atenuação Crítica
-    if (isAtenuacaocritica) {
-      if (checkIfConcluido(item)) {
+    // 4. Guia "Rompimentos":
+    // Estritamente "DWDM - ROMPIMENTO", sem nenhum "DWDM O&M"
+    const isRompimentoEstrito = 
+      !isDwdmOm && 
+      (rawCat.includes("DWDM - ROMPIMENTO") || catNorm.includes("dwdm - rompimento") || catNorm === "dwdm - rompimento" || catNorm.startsWith("dwdm - rompimento"));
+    if (isRompimentoEstrito) {
+      if (checkIfConcluido(item) || (hasDataFimInPeriod && !isAtenuado)) {
         return { type: "resolvido", emoji: "🟢" };
       }
-      return { type: "atenuacao_critica", emoji: "🟠" };
+      return { type: "rompimento", emoji: "🔴" };
     }
 
-    // 2. Status Atenuado
-    if (isAtenuado) {
-      return { type: "atenuado", emoji: "🟡" };
-    }
-
-    // 3. Temperatura / Infra (estrita às 2 categorias da Regra B)
+    // 5. Guia "Temperatura / Infra":
+    // Captura todos os chamados cujo tipo/categoria comece com ou contenha "Operações de Infraestrutura -"
+    const isTemperaturaInfra = 
+      rawCat.includes("Operações de Infraestrutura -") || 
+      catNorm.includes("operacoes de infraestrutura -") ||
+      catNorm === "operacoes de infraestrutura - alerta de temperatura" || 
+      catNorm === "imoc - acompanhamento de acesso ao dc";
     if (isTemperaturaInfra) {
       if (checkIfConcluido(item)) {
         return { type: "resolvido", emoji: "🟢" };
@@ -738,16 +749,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
       return { type: "temperatura", emoji: "🌡️" };
     }
 
-    // 4. Rompimentos (demais rompimentos)
-    const isRompimento = catNorm.includes("rompimento") || titNorm.includes("rompimento");
-    if (isRompimento) {
-      if (checkIfConcluido(item) || (hasDataFimInPeriod && !isAtenuado)) {
-        return { type: "resolvido", emoji: "🟢" };
-      }
-      return { type: "rompimento", emoji: "🔴" };
-    }
-
-    // 5. Indisponibilidade
+    // 6. Indisponibilidade (mantém original)
     const isIndisponibilidade = catNorm.includes("indisponibilidade") || titNorm.includes("indisponibilidade");
     if (isIndisponibilidade) {
       if (checkIfConcluido(item)) {
@@ -1150,6 +1152,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     // Calcula as métricas solicitadas sobre a lista do período utilizando a função centralizada
     let totalResolvidos = 0;
     let totalRompimentos = 0;
+    let totalDwdmOm = 0;
     let totalAtenuados = 0;
     let totalAtenuacoesCriticas = 0;
     let totalTemperatura = 0;
@@ -1159,6 +1162,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     incidentsInPeriod.forEach(i => {
       const cls = getClassification(i);
       if (cls.type === "resolvido") totalResolvidos++;
+      else if (cls.type === "dwdm_om") totalDwdmOm++;
       else if (cls.type === "temperatura") totalTemperatura++;
       else if (cls.type === "rompimento") totalRompimentos++;
       else if (cls.type === "indisponibilidade") totalIndisponibilidade++;
@@ -1176,6 +1180,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     rText += `*RESUMO DOS STATUS*\n`;
     if (totalResolvidos > 0) rText += `🟢 Resolvidos: ${totalResolvidos}\n`;
     if (totalRompimentos > 0) rText += `🔴 Rompimentos: ${totalRompimentos}\n`;
+    if (totalDwdmOm > 0) rText += `🔧 DWDM O&M: ${totalDwdmOm}\n`;
     if (totalAtenuacoesCriticas > 0) rText += `🟠 Atenuações Críticas: ${totalAtenuacoesCriticas}\n`;
     if (totalAtenuados > 0) rText += `🟡 Trechos que voltaram atenuados: ${totalAtenuados}\n`;
     if (totalTemperatura > 0) rText += `🌡️ Alertas de temperatura / infraestrutura: ${totalTemperatura}\n`;
@@ -1196,6 +1201,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const grouped: { [key: string]: any[] } = {
       resolvido: [],
       rompimento: [],
+      dwdm_om: [],
       atenuacao_critica: [],
       atenuado: [],
       temperatura: [],
@@ -1215,6 +1221,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const categoriesConfig = [
       { key: "resolvido", title: "Resolvidos", emoji: "🟢" },
       { key: "rompimento", title: "Rompimentos", emoji: "🔴" },
+      { key: "dwdm_om", title: "DWDM O&M", emoji: "🔧" },
       { key: "atenuacao_critica", title: "Atenuações Críticas", emoji: "🟠" },
       { key: "atenuado", title: "Trechos que voltaram atenuados", emoji: "🟡" },
       { key: "temperatura", title: "Alertas de temperatura / infraestrutura", emoji: "🌡️" },
@@ -1293,7 +1300,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
         const titleText = (cat.title || "INFORMAÇÃO ADICIONAL").trim().toUpperCase();
         rText += `\n━━━━━━━━━━━━━━━━━━━\n\n`;
         rText += `*${cat.emoji || "📌"} ${titleText}*\n-----------------\n\n`;
-        if (cat.content && cat.content.trim() !== "") {
+        if (cat.content && typeof cat.content === "string" && cat.content.trim() !== "") {
           const lines = cat.content.trim().split("\n");
           lines.forEach(line => {
             rText += `> ${line}\n`;
@@ -1346,6 +1353,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
     const categoriesOrder = [
       { key: "rompimento", label: "🔴 *Rompimentos*" },
+      { key: "dwdm_om", label: "🔧 *DWDM O&M*" },
       { key: "atenuacao_critica", label: "🟠 *Atenuações Críticas*" },
       { key: "atenuado", label: "🟡 *Atenuados*" },
       { key: "temperatura", label: "🌡️ *Temperatura / Infraestrutura*" },
@@ -1678,9 +1686,16 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
     // Regra B: "Temperatura / Infra" -> apenas concluído por campo/status
     const isTemperaturaInfra = 
+      catVal.includes("operacoes de infraestrutura -") ||
       catVal === "operacoes de infraestrutura - alerta de temperatura" || 
       catVal === "imoc - acompanhamento de acesso ao dc";
     if (isTemperaturaInfra) {
+      return isConcluidoField;
+    }
+
+    // Regra C: "DWDM O&M" -> apenas concluído por campo/status
+    const isDwdmOm = catVal.includes("dwdm o&m -") || catVal.includes("dwdm o&m");
+    if (isDwdmOm) {
       return isConcluidoField;
     }
 
@@ -1689,7 +1704,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
       return statusVal === "up" || isConcluidoField;
     }
 
-    const isRompimento = catVal.includes("rompimento") || titVal.includes("rompimento");
+    const isRompimento = !isDwdmOm && (catVal.includes("dwdm - rompimento") || catVal === "dwdm - rompimento");
     if (isRompimento) {
       const isAtenuacaoCritica = normStr(getVal(item, "Atenuação Crítica") || getVal(item, "Atenuacao Critica") || "") === "sim";
       const isAtenuado = statusVal === "atenuado";
@@ -1715,6 +1730,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const counts = {
       all: 0,
       rompimento: 0,
+      dwdm_om: 0,
       atenuacao_critica: 0,
       atenuado: 0,
       temperatura: 0,
@@ -1728,12 +1744,12 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
       const clsType = getClassification(item).type;
       if (clsType === "rompimento") {
         counts.rompimento += 1;
+      } else if (clsType === "dwdm_om") {
+        counts.dwdm_om += 1;
       } else if (clsType === "atenuacao_critica") {
         counts.atenuacao_critica += 1;
-        counts.rompimento += 1; // Subfiltro Rompimentos agrega rompimentos normais + atenuação crítica + atenuados
       } else if (clsType === "atenuado") {
         counts.atenuado += 1;
-        counts.rompimento += 1; // Subfiltro Rompimentos agrega rompimentos normais + atenuação crítica + atenuados
       } else if (clsType === "temperatura") {
         counts.temperatura += 1;
       } else if (clsType === "indisponibilidade") {
@@ -1751,6 +1767,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
     const counts = {
       all: 0,
       rompimento: 0,
+      dwdm_om: 0,
       atenuacao_critica: 0,
       atenuado: 0,
       temperatura: 0,
@@ -1764,12 +1781,12 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
       const nature = getNatureType(item);
       if (nature === "rompimento") {
         counts.rompimento += 1;
+      } else if (nature === "dwdm_om") {
+        counts.dwdm_om += 1;
       } else if (nature === "atenuacao_critica") {
         counts.atenuacao_critica += 1;
-        counts.rompimento += 1;
       } else if (nature === "atenuado") {
         counts.atenuado += 1;
-        counts.rompimento += 1;
       } else if (nature === "temperatura") {
         counts.temperatura += 1;
       } else if (nature === "indisponibilidade") {
@@ -1796,11 +1813,13 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
       const isImocRompimentoCanal = catVal === "imoc - rompimento dwdm canal" || catVal.startsWith("imoc - rompimento dwdm canal");
       const isTemperatura = 
+        catVal.includes("operacoes de infraestrutura -") ||
         catVal === "operacoes de infraestrutura - alerta de temperatura" || 
         catVal === "imoc - acompanhamento de acesso ao dc";
+      const isDwdmOm = catVal.includes("dwdm o&m -") || catVal.includes("dwdm o&m");
       const isIndisponibilidade = catVal.includes("indisponibilidade") || titVal.includes("indisponibilidade");
 
-      const isRfoPendente = !isImocRompimentoCanal && !isTemperatura && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
+      const isRfoPendente = !isImocRompimentoCanal && !isTemperatura && !isDwdmOm && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
 
       if (isRfoPendente) {
         const rawSubcat = String(getVal(item, "Subcategoria") || getVal(item, "subcategoria") || "").trim();
@@ -1839,23 +1858,13 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
 
       // Filtro pelas guias (Tabs)
       if (activeTab === 'todos') {
-        if (pendingCategoryFilter === "all") {
-          // Passa todos os registros
-        } else if (pendingCategoryFilter === "rompimento") {
-          const nature = getNatureType(item);
-          if (nature !== "rompimento" && nature !== "atenuado" && nature !== "atenuacao_critica") return false;
-        } else {
+        if (pendingCategoryFilter !== "all") {
           if (getNatureType(item) !== pendingCategoryFilter) return false;
         }
       } else if (activeTab === 'pendentes') {
         if (!isPendingBaseIncident(item)) return false;
 
-        if (pendingCategoryFilter === "all") {
-          // Passa todos os pendentes
-        } else if (pendingCategoryFilter === "rompimento") {
-          const clsType = getClassification(item).type;
-          if (clsType !== "rompimento" && clsType !== "atenuado" && clsType !== "atenuacao_critica") return false;
-        } else {
+        if (pendingCategoryFilter !== "all") {
           if (getClassification(item).type !== pendingCategoryFilter) return false;
         }
       } else if (activeTab === 'rfos_pendentes') {
@@ -1863,14 +1872,16 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
         const titVal = normStr(getVal(item, "Título") || getVal(item, "Titulo") || "");
         const isImocRompimentoCanal = catVal === "imoc - rompimento dwdm canal" || catVal.startsWith("imoc - rompimento dwdm canal");
         const isTemperatura = 
+          catVal.includes("operacoes de infraestrutura -") ||
           catVal === "operacoes de infraestrutura - alerta de temperatura" || 
           catVal === "imoc - acompanhamento de acesso ao dc";
+        const isDwdmOm = catVal.includes("dwdm o&m -") || catVal.includes("dwdm o&m");
         const isIndisponibilidade = catVal.includes("indisponibilidade") || titVal.includes("indisponibilidade");
 
         const statusVal = normStr(getVal(item, "Status") || "");
         const rfoVal = normStr(getVal(item, "RFO") || "");
 
-        const isRfoCandidate = !isImocRompimentoCanal && !isTemperatura && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
+        const isRfoCandidate = !isImocRompimentoCanal && !isTemperatura && !isDwdmOm && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
         if (!isRfoCandidate) return false;
 
         if (selectedRfoSubcategories.length === 0) return false;
@@ -1960,23 +1971,13 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
       }
 
       if (activeTab === 'todos') {
-        if (pendingCategoryFilter === "all") {
-          // OK
-        } else if (pendingCategoryFilter === "rompimento") {
-          const nature = getNatureType(item);
-          if (nature !== "rompimento" && nature !== "atenuado" && nature !== "atenuacao_critica") return false;
-        } else {
+        if (pendingCategoryFilter !== "all") {
           if (getNatureType(item) !== pendingCategoryFilter) return false;
         }
       } else if (activeTab === 'pendentes') {
         if (!isPendingBaseIncident(item)) return false;
 
-        if (pendingCategoryFilter === "all") {
-          // OK
-        } else if (pendingCategoryFilter === "rompimento") {
-          const clsType = getClassification(item).type;
-          if (clsType !== "rompimento" && clsType !== "atenuado" && clsType !== "atenuacao_critica") return false;
-        } else {
+        if (pendingCategoryFilter !== "all") {
           if (getClassification(item).type !== pendingCategoryFilter) return false;
         }
       } else if (activeTab === 'rfos_pendentes') {
@@ -1984,14 +1985,16 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
         const titVal = normStr(getVal(item, "Título") || getVal(item, "Titulo") || "");
         const isImocRompimentoCanal = catVal === "imoc - rompimento dwdm canal" || catVal.startsWith("imoc - rompimento dwdm canal");
         const isTemperatura = 
+          catVal.includes("operacoes de infraestrutura -") ||
           catVal === "operacoes de infraestrutura - alerta de temperatura" || 
           catVal === "imoc - acompanhamento de acesso ao dc";
+        const isDwdmOm = catVal.includes("dwdm o&m -") || catVal.includes("dwdm o&m");
         const isIndisponibilidade = catVal.includes("indisponibilidade") || titVal.includes("indisponibilidade");
 
         const statusVal = normStr(getVal(item, "Status") || "");
         const rfoVal = normStr(getVal(item, "RFO") || "");
 
-        const isRfoCandidate = !isImocRompimentoCanal && !isTemperatura && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
+        const isRfoCandidate = !isImocRompimentoCanal && !isTemperatura && !isDwdmOm && !isIndisponibilidade && statusVal === "up" && (rfoVal === "pendente" || rfoVal === "");
         if (!isRfoCandidate) return false;
 
         if (selectedRfoSubcategories.length === 0) return false;
@@ -2066,40 +2069,6 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
   const inconsistenciesCount = useMemo(() => {
     return incidents.filter(i => !isCorruptLine(i) && checkIncidentDateError(i).hasDateError).length;
   }, [incidents]);
-
-  // Local state for incident notes (stored in localStorage and synced)
-  const [incidentNotes, setIncidentNotes] = useState<Record<string, string>>(() => {
-    try {
-      const saved = localStorage.getItem("cbe_incident_notes");
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
-  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
-
-  const handleSaveNote = async (id: string, noteText: string) => {
-    setSavingNoteId(id);
-    const updated = { ...incidentNotes, [id]: noteText };
-    setIncidentNotes(updated);
-    localStorage.setItem("cbe_incident_notes", JSON.stringify(updated));
-
-    try {
-      if (postToSheets) {
-        await postToSheets("update", "ANOTACOES_INCIDENTES", { id, anotação: noteText, dataAtualizacao: new Date().toLocaleString("pt-BR") });
-      } else {
-        await fetch("/api/sheets", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "update", tabName: "ANOTACOES_INCIDENTES", payload: { id, anotação: noteText, dataAtualizacao: new Date().toLocaleString("pt-BR") } })
-        });
-      }
-    } catch (e) {
-      console.error("Erro ao salvar anotação na planilha:", e);
-    } finally {
-      setSavingNoteId(null);
-    }
-  };
 
   return (
     <div className="space-y-3.5 font-sans">
@@ -2478,6 +2447,18 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
               >
                 <Zap className="w-3.5 h-3.5 shrink-0" />
                 <span>Rompimentos ({currentCategoryCounts.rompimento})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingCategoryFilter('dwdm_om')}
+                className={`pb-2.5 text-xs font-sans whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 border-b-2 -mb-[1px] bg-transparent ${
+                  pendingCategoryFilter === 'dwdm_om'
+                    ? "border-[#FF5022] text-[#FF5022] font-bold"
+                    : "border-transparent text-gray-500 hover:text-gray-700 font-medium"
+                }`}
+              >
+                <Wrench className="w-3.5 h-3.5 shrink-0" />
+                <span>DWDM O&M ({currentCategoryCounts.dwdm_om})</span>
               </button>
               <button
                 type="button"
@@ -3061,39 +3042,7 @@ export function ControleIncidentes({ searchTerm: globalSearchTerm, currentUser, 
                                 </div>
                               </div>
 
-                              {/* Anotações Adicionais do Chamado */}
-                              <div className="bg-amber-50/40 p-4 rounded-xl border border-amber-200/80 space-y-2 shadow-xs">
-                                <div className="flex items-center justify-between">
-                                  <div className="text-[10px] font-bold text-amber-900 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                                    <FileText className="w-3.5 h-3.5 text-amber-600" /> Anotações do Chamado #{id}
-                                  </div>
-                                  {incidentNotes[id] && (
-                                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded font-mono">
-                                      Anotação Registrada
-                                    </span>
-                                  )}
-                                </div>
-                                <textarea
-                                  rows={2}
-                                  placeholder="Escreva anotações internas, observações técnicas ou notas do operador..."
-                                  value={incidentNotes[id] || ""}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setIncidentNotes(prev => ({ ...prev, [id]: val }));
-                                  }}
-                                  className="w-full bg-white border border-amber-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/30 transition font-sans"
-                                ></textarea>
-                                <div className="flex justify-end">
-                                  <button
-                                    onClick={() => handleSaveNote(id, incidentNotes[id] || "")}
-                                    disabled={savingNoteId === id}
-                                    className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow-xs disabled:opacity-50"
-                                  >
-                                    <Check className="w-3.5 h-3.5" />
-                                    <span>{savingNoteId === id ? "Salvando..." : "Salvar Anotação"}</span>
-                                  </button>
-                                </div>
-                              </div>
+
                             </div>
                           </td>
                         </tr>

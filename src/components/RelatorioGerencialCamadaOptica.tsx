@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef } from "react";
-import html2canvas from "html2canvas";
+import html2canvas from "html2canvas-pro";
 import { jsPDF } from "jspdf";
 // @ts-ignore
 import html2pdf from "html2pdf.js";
@@ -433,10 +433,23 @@ export const RelatorioGerencialCamadaOptica: React.FC<RelatorioGerencialCamadaOp
     // Aguarda ciclo de renderização do React para atualizar o DOM com o modo selecionado
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    // Helper para converter com segurança qualquer valor CSS de cor (incluindo oklch) para rgb/rgba
+    // Garante que o html2canvas no escopo global e no bundle seja o html2canvas-pro com suporte a oklab/oklch
+    if (typeof window !== "undefined") {
+      (window as any).html2canvas = html2canvas;
+    }
+
+    // Helper para converter com segurança qualquer valor CSS de cor (incluindo oklab, oklch, color-mix) para rgb/rgba
     const parseColorToRgb = (colorStr: string): string => {
       if (!colorStr || typeof colorStr !== "string") return "#1E1E1E";
-      if (!colorStr.includes("oklch")) return colorStr;
+      const trimmed = colorStr.trim();
+      if (
+        !trimmed.includes("oklch") &&
+        !trimmed.includes("oklab") &&
+        !trimmed.includes("color-mix") &&
+        !trimmed.includes("color(")
+      ) {
+        return colorStr;
+      }
       try {
         const canvas = document.createElement("canvas");
         canvas.width = 1;
@@ -444,10 +457,10 @@ export const RelatorioGerencialCamadaOptica: React.FC<RelatorioGerencialCamadaOp
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) return "#1E1E1E";
 
-        // O browser moderno entende oklch perfeitamente no CanvasRenderingContext2D
+        // O browser moderno entende oklab e oklch perfeitamente no CanvasRenderingContext2D
         ctx.clearRect(0, 0, 1, 1);
         ctx.fillStyle = "#ffffff";
-        ctx.fillStyle = colorStr;
+        ctx.fillStyle = trimmed;
         ctx.fillRect(0, 0, 1, 1);
 
         const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
@@ -528,8 +541,15 @@ export const RelatorioGerencialCamadaOptica: React.FC<RelatorioGerencialCamadaOp
 
             const styleTags = clonedDoc.querySelectorAll("style");
             styleTags.forEach((s) => {
-              if (s.textContent && s.textContent.includes("oklch")) {
-                s.textContent = s.textContent.replace(/oklch\([^)]+\)/g, (match) => parseColorToRgb(match));
+              if (
+                s.textContent &&
+                (s.textContent.includes("oklch") ||
+                  s.textContent.includes("oklab") ||
+                  s.textContent.includes("color-mix"))
+              ) {
+                s.textContent = s.textContent
+                  .replace(/oklch\([^)]+\)/gi, (match) => parseColorToRgb(match))
+                  .replace(/oklab\([^)]+\)/gi, (match) => parseColorToRgb(match));
               }
             });
 
@@ -736,7 +756,7 @@ export const RelatorioGerencialCamadaOptica: React.FC<RelatorioGerencialCamadaOp
                     key={`ata-${id}-${ataIdx}`}
                     className={`ata-item border-l-4 ${
                       type === "fechado" || metaRecord.normStatus === "Sem solução" ? "border-[#10B981] bg-[#F0FDF4]" : "border-[#FF5022] bg-[#FFF7ED]"
-                    } p-2.5 text-xs rounded-r block shadow-sm border border-l-4 border-y-transparent border-r-transparent`}
+                    } p-2.5 text-xs rounded-r block border border-l-4 border-y-transparent border-r-transparent`}
                   >
                     <div className="flex items-center justify-between text-[11px] font-medium text-[#6B7280] mb-1">
                       <div className="flex items-center gap-1.5">
@@ -746,7 +766,7 @@ export const RelatorioGerencialCamadaOptica: React.FC<RelatorioGerencialCamadaOp
                         <span>•</span>
                         <span>por <strong className="text-[#374151]">{ata.author}</strong></span>
                         {atasMode === "ultima" && (
-                          <span className="text-[10px] bg-white border border-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-mono font-bold ml-1 shadow-sm">
+                          <span className="text-[10px] bg-white border border-gray-200 text-gray-500 px-1.5 py-0.5 rounded font-mono font-bold ml-1">
                             Última Atualização
                           </span>
                         )}
